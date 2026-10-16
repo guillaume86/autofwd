@@ -48,7 +48,7 @@ go install github.com/guillaume86/autofwd/cmd/autofwd@latest
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o autofwd ./cmd/autofwd
 ```
 
-To cross-compile, set `GOOS`/`GOARCH` (for example `GOOS=windows GOARCH=arm64`), or build every release target at once with `go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean`; the archives land in `dist/`.
+To cross-compile, set `GOOS`/`GOARCH` (for example `GOOS=windows GOARCH=arm64`), or build every release target at once with [GoReleaser](https://goreleaser.com/install/) (`goreleaser release --snapshot --clean`); the archives land in `dist/`.
 
 ### Remote host requirements
 

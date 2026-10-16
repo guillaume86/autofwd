@@ -46,9 +46,17 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean --skip=publish
-      - uses: actions/upload-artifact@v4
+      # The action downloads a prebuilt GoReleaser; building it with `go run`
+      # would need whatever newer Go toolchain its own go.mod demands.
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish
+      - uses: actions/upload-artifact@v7
         with:
           name: snapshot
-          path: dist/*.{zip,tar.gz,txt}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/checksums.txt
           retention-days: 7

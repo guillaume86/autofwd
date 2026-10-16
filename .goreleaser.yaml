@@ -1,4 +1,4 @@
-# Validate with: go run github.com/goreleaser/goreleaser/v2@latest check
+# Validate with: goreleaser check
 version: 2
 
 project_name: autofwd
