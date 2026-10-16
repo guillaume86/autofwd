@@ -1,0 +1,44 @@
+# Validate with: go run github.com/goreleaser/goreleaser/v2@latest check
+version: 2
+
+project_name: autofwd
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/autofwd
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    targets:
+      - windows_amd64
+      - windows_arm64
+      - linux_amd64
+      - linux_arm64
+      - darwin_amd64
+      - darwin_arm64
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github-native
+
+release:
+  draft: false
+  prerelease: auto
