@@ -322,11 +322,28 @@ func TestAuthFailureIsFatalOnFirstConnect(t *testing.T) {
 func TestUnreachableHostIsRetried(t *testing.T) {
 	h := setup(t, setupOpts{})
 	h.srv.Close() // nothing listens any more
-	sshtest.Eventually(t, 5*time.Second, "two failed attempts", func() bool {
-		logs := h.logs.String()
-		// The first failure is spelled out; identical repeats are collapsed.
-		return strings.Count(logs, "! connect to dev failed") == 1 && strings.Contains(logs, "! still cannot connect to dev")
+	sshtest.Eventually(t, 5*time.Second, "repeated failed attempts", func() bool {
+		return strings.Contains(h.logs.String(), "! still cannot connect to dev")
 	})
+	// Each distinct error is spelled out once; identical repeats collapse to
+	// "still cannot connect". The first attempt may race the server shutting
+	// down and fail differently from the later "refused" ones, so more than
+	// one spelled-out line is fine as long as none repeats.
+	seen := map[string]bool{}
+	for _, line := range strings.Split(h.logs.String(), "\n") {
+		_, msg, ok := strings.Cut(line, "! connect to dev failed: ")
+		if !ok {
+			continue
+		}
+		msg, _, _ = strings.Cut(msg, " (retry in ")
+		if seen[msg] {
+			t.Errorf("error spelled out twice instead of collapsed: %s", msg)
+		}
+		seen[msg] = true
+	}
+	if len(seen) == 0 {
+		t.Error("no spelled-out connect failure")
+	}
 	select {
 	case err := <-h.done:
 		t.Fatalf("Run gave up on a network error: %v", err)
