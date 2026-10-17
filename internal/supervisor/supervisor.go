@@ -9,7 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/guillaume86/autofwd/internal/forward"
 	"github.com/guillaume86/autofwd/internal/logx"
 	"github.com/guillaume86/autofwd/internal/ports"
+	"github.com/guillaume86/autofwd/internal/procinfo"
 	"github.com/guillaume86/autofwd/internal/procnet"
 	"github.com/guillaume86/autofwd/internal/sshconn"
 )
@@ -74,8 +78,9 @@ func (s ConnState) String() string {
 
 // Skipped is a remote listener the filter excluded.
 type Skipped struct {
-	Port   uint16
-	Reason string
+	Port    uint16
+	Reason  string
+	Process string // the remote process or unit, when known
 }
 
 // Status is a snapshot for the interactive status view.
@@ -326,6 +331,19 @@ func (s *Supervisor) keepalive(ctx context.Context, client Client) error {
 	}
 }
 
+// maxLookupFailures stops process lookups for the rest of a connection once
+// they keep failing, so a host without sh does not pay for one per poll.
+const maxLookupFailures = 3
+
+// procState is what one connection has learned about remote processes.
+type procState struct {
+	env      procinfo.Env
+	sockets  map[uint64]procinfo.Socket // by inode, pruned to live sockets
+	failures int                        // consecutive failed lookups
+	reported bool                       // env has been logged
+	excluded map[uint16]string          // last logged reason per port
+}
+
 // discover polls the remote port tables and syncs the forward manager until
 // ctx ends or polling keeps failing.
 func (s *Supervisor) discover(ctx context.Context, client Client, m *forward.Manager) error {
@@ -333,6 +351,7 @@ func (s *Supervisor) discover(ctx context.Context, client Client, m *forward.Man
 	defer t.Stop()
 	failures := 0
 	var lastUnusable string
+	ps := &procState{env: procinfo.Env{UID: -1}, sockets: make(map[uint64]procinfo.Socket), excluded: make(map[uint16]string)}
 	for {
 		ls, err := s.poll(ctx, client)
 		switch {
@@ -346,14 +365,19 @@ func (s *Supervisor) discover(ctx context.Context, client Client, m *forward.Man
 			s.o.Log.Warnf("! port discovery: %v", err)
 		default:
 			failures = 0
-			targets, unusable := ports.Select(ls, s.o.Filter)
+			s.resolve(ctx, client, ps, ls)
+			if ctx.Err() != nil {
+				return nil
+			}
+			kept, procSkipped := s.applyProcessRules(ps, ls)
+			targets, unusable := ports.Select(kept, s.o.Filter)
 			if u := fmt.Sprint(unusable); len(unusable) > 0 && u != lastUnusable {
 				s.o.Log.Debugf("  not forwarding link-local listeners without a known scope: %v", unusable)
 				lastUnusable = u
 			}
-			skipped := s.skipped(ls)
+			skipped := s.skipped(ls, procSkipped, targets)
 			s.setState(func(st *Status) { st.Skipped = skipped })
-			m.Sync(targets)
+			m.Sync(s.labelTargets(ps, kept, targets))
 		}
 		select {
 		case <-ctx.Done():
@@ -364,9 +388,108 @@ func (s *Supervisor) discover(ctx context.Context, client Client, m *forward.Man
 	}
 }
 
-// skipped lists the remote listeners the filter excluded, one entry per
-// port, sorted.
-func (s *Supervisor) skipped(ls []procnet.Listener) []Skipped {
+// resolve looks up the processes behind sockets not seen before, then drops
+// cache entries for sockets that are gone. Only listeners the port rules
+// allow are looked up. A failed lookup leaves them unknown, which forwards
+// them unlabeled; the next poll tries again.
+func (s *Supervisor) resolve(ctx context.Context, client Client, ps *procState, ls []procnet.Listener) {
+	live := make(map[uint64]bool, len(ls))
+	var missing []procnet.Listener
+	for _, l := range ls {
+		if !l.HasOwner() {
+			continue
+		}
+		live[l.Inode] = true
+		if _, ok := ps.sockets[l.Inode]; !ok && s.o.Filter.Allow(l.Port) {
+			missing = append(missing, l)
+		}
+	}
+	maps.DeleteFunc(ps.sockets, func(ino uint64, _ procinfo.Socket) bool { return !live[ino] })
+	if len(missing) == 0 || ps.failures >= maxLookupFailures {
+		return
+	}
+	env, res, err := s.lookup(ctx, client, missing)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		ps.failures++
+		if ps.failures == maxLookupFailures {
+			s.o.Log.Debugf("  process lookup failed %d times, giving up for this connection: %v", ps.failures, err)
+		} else {
+			s.o.Log.Debugf("  process lookup: %v", err)
+		}
+		return
+	}
+	ps.failures = 0
+	ps.env = env
+	maps.Copy(ps.sockets, res)
+	if !ps.reported {
+		ps.reported = true
+		s.o.Log.Debugf("  process info: %s", env.Describe())
+	}
+}
+
+// applyProcessRules drops the listeners that the owner and process rules
+// exclude. It returns the rest, and one Skipped per port whose listeners
+// were all dropped (ports with a surviving listener are filtered out later).
+func (s *Supervisor) applyProcessRules(ps *procState, ls []procnet.Listener) ([]procnet.Listener, map[uint16]Skipped) {
+	kept := make([]procnet.Listener, 0, len(ls))
+	skipped := make(map[uint16]Skipped)
+	for _, l := range ls {
+		if !s.o.Filter.Allow(l.Port) {
+			continue // Select skips it too, and skipped() reports why
+		}
+		sock := ps.sockets[l.Inode]
+		reason := s.o.Filter.ProcessReason(l, sock, ps.env)
+		if reason == "" {
+			kept = append(kept, l)
+			continue
+		}
+		if _, ok := skipped[l.Port]; !ok {
+			name := sock.Unit
+			if sock.Proc != nil {
+				name = sock.Proc.Name
+			}
+			skipped[l.Port] = Skipped{Port: l.Port, Reason: reason, Process: name}
+		}
+	}
+	maps.DeleteFunc(ps.excluded, func(port uint16, _ string) bool {
+		_, still := skipped[port]
+		return !still
+	})
+	for port, sk := range skipped {
+		if ps.excluded[port] != sk.Reason {
+			ps.excluded[port] = sk.Reason
+			s.o.Log.Debugf("  not forwarding %d %s: %s", port, cmp.Or(sk.Process, "(unknown process)"), sk.Reason)
+		}
+	}
+	return kept, skipped
+}
+
+// labelTargets attaches each forwarded port's process label.
+func (s *Supervisor) labelTargets(ps *procState, kept []procnet.Listener, targets map[uint16]netip.AddrPort) map[uint16]forward.Target {
+	out := make(map[uint16]forward.Target, len(targets))
+	for port, addr := range targets {
+		out[port] = forward.Target{Addr: addr}
+	}
+	for _, l := range kept {
+		t, ok := out[l.Port]
+		if !ok || t.Label != "" {
+			continue
+		}
+		if sock := ps.sockets[l.Inode]; sock.Known() {
+			t.Label = sock.Label(ps.env.Home)
+			out[l.Port] = t
+		}
+	}
+	return out
+}
+
+// skipped lists the remote listeners the filters excluded, one entry per
+// port, sorted: port rules first, then the process rules for ports that
+// ended up with no listener left.
+func (s *Supervisor) skipped(ls []procnet.Listener, procSkipped map[uint16]Skipped, targets map[uint16]netip.AddrPort) []Skipped {
 	seen := make(map[uint16]bool)
 	var out []Skipped
 	for _, l := range ls {
@@ -378,13 +501,23 @@ func (s *Supervisor) skipped(ls []procnet.Listener) []Skipped {
 			out = append(out, Skipped{Port: l.Port, Reason: reason})
 		}
 	}
+	for port, sk := range procSkipped {
+		if _, forwarded := targets[port]; !forwarded && !seen[port] {
+			out = append(out, sk)
+		}
+	}
 	slices.SortFunc(out, func(a, b Skipped) int { return cmp.Compare(a.Port, b.Port) })
 	return out
 }
 
-func (s *Supervisor) poll(ctx context.Context, client Client) ([]procnet.Listener, error) {
-	var stdout bytes.Buffer
-	stderr := &limitedBuffer{max: 4096}
+// errTimeout marks a remote command that did not finish within PollTimeout.
+var errTimeout = errors.New("timed out")
+
+// run executes cmd in a new session, feeding it stdin, and returns what it
+// printed. A non-nil error with output means the command ran but failed.
+func (s *Supervisor) run(ctx context.Context, client Client, cmd, stdin string, maxOut int) (stdout, stderr []byte, err error) {
+	out := &limitedBuffer{max: maxOut}
+	errOut := &limitedBuffer{max: 4096}
 
 	// Opening the session and running the command both go under the timer:
 	// neither has a timeout of its own, and on a silent link they never
@@ -398,9 +531,12 @@ func (s *Supervisor) poll(ctx context.Context, client Client) ([]procnet.Listene
 			done <- fmt.Errorf("opening session: %w", err)
 			return
 		}
-		sess.Stdout, sess.Stderr = &stdout, stderr
+		sess.Stdout, sess.Stderr = out, errOut
+		if stdin != "" {
+			sess.Stdin = strings.NewReader(stdin)
+		}
 		opened <- sess
-		done <- sess.Run(ProcCommand)
+		done <- sess.Run(cmd)
 	}()
 	closeSession := func() {
 		select {
@@ -411,35 +547,62 @@ func (s *Supervisor) poll(ctx context.Context, client Client) ([]procnet.Listene
 	}
 	timer := time.NewTimer(s.o.PollTimeout)
 	defer timer.Stop()
-	var err error
 	select {
 	case err = <-done:
 		closeSession()
 	case <-timer.C:
 		closeSession()
-		return nil, fmt.Errorf("%s timed out after %v", ProcCommand, s.o.PollTimeout)
+		return nil, nil, fmt.Errorf("%w after %v", errTimeout, s.o.PollTimeout)
 	case <-ctx.Done():
 		closeSession()
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	}
+	return out.b.Bytes(), bytes.TrimSpace(errOut.b.Bytes()), err
+}
 
-	out := stdout.Bytes()
+func (s *Supervisor) poll(ctx context.Context, client Client) ([]procnet.Listener, error) {
+	out, stderr, err := s.run(ctx, client, ProcCommand, "", 64<<20)
+	if errors.Is(err, errTimeout) || ctx.Err() != nil {
+		return nil, fmt.Errorf("%s %w", ProcCommand, err)
+	}
 	if !bytes.Contains(out, []byte("local_address")) {
 		if err == nil {
 			err = errors.New("no TCP table in output (is the remote host Linux?)")
 		}
-		return nil, fmt.Errorf("%s: %w: %s", ProcCommand, err, bytes.TrimSpace(stderr.b.Bytes()))
+		return nil, fmt.Errorf("%s: %w: %s", ProcCommand, err, stderr)
 	}
 	// A non-zero exit with a table present usually means /proc/net/tcp6 is
 	// missing because IPv6 is disabled; the IPv4 table is still good.
 	if err != nil {
-		s.o.Log.Debugf("  %s: %v: %s", ProcCommand, err, bytes.TrimSpace(stderr.b.Bytes()))
+		s.o.Log.Debugf("  %s: %v: %s", ProcCommand, err, stderr)
 	}
 	ls, perr := procnet.Parse(out)
 	if perr != nil {
 		s.o.Log.Debugf("  ignored unparsable lines: %v", perr)
 	}
 	return ls, nil
+}
+
+// lookup asks the remote host which processes own the given listeners. Its
+// output is bounded: a host with very many processes truncates it, which
+// only loses some details.
+func (s *Supervisor) lookup(ctx context.Context, client Client, ls []procnet.Listener) (procinfo.Env, map[uint64]procinfo.Socket, error) {
+	inodes := make([]uint64, 0, len(ls))
+	for _, l := range ls {
+		inodes = append(inodes, l.Inode)
+	}
+	out, stderr, err := s.run(ctx, client, procinfo.Command, procinfo.Script(inodes), 16<<20)
+	if !bytes.Contains(out, []byte("@@autofwd end")) {
+		if err == nil {
+			err = errors.New("incomplete output")
+		}
+		if len(stderr) > 0 {
+			err = fmt.Errorf("%w: %s", err, stderr)
+		}
+		return procinfo.Env{}, nil, err
+	}
+	env, res := procinfo.Parse(out, ls)
+	return env, res, nil
 }
 
 type limitedBuffer struct {

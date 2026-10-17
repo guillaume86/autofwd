@@ -25,7 +25,14 @@ const StateListen = "0A"
 type Listener struct {
 	Addr netip.Addr // IPv4-mapped IPv6 addresses are unmapped to plain IPv4
 	Port uint16
+	// UID owns the socket and Inode identifies it across tables. Both come
+	// from the trailing columns; Inode is 0 when a row lacks them.
+	UID   uint32
+	Inode uint64
 }
+
+// HasOwner reports whether the row carried its uid and inode columns.
+func (l Listener) HasOwner() bool { return l.Inode != 0 }
 
 func (l Listener) String() string {
 	return netip.AddrPortFrom(l.Addr, l.Port).String()
@@ -61,7 +68,18 @@ func Parse(data []byte) ([]Listener, error) {
 			errs = append(errs, fmt.Errorf("line %d: %w", lineNo, err))
 			continue
 		}
-		out = append(out, Listener{Addr: addr, Port: port})
+		l := Listener{Addr: addr, Port: port}
+		// Columns: sl local rem st tx:rx tr:when retrnsmt uid timeout inode.
+		// They are optional here: a row that lacks or garbles them is still
+		// a usable listener, just one without an owner.
+		if len(fields) >= 10 {
+			uid, uerr := strconv.ParseUint(fields[7], 10, 32)
+			ino, ierr := strconv.ParseUint(fields[9], 10, 64)
+			if uerr == nil && ierr == nil {
+				l.UID, l.Inode = uint32(uid), ino
+			}
+		}
+		out = append(out, l)
 	}
 	if err := sc.Err(); err != nil {
 		errs = append(errs, err)

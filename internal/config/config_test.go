@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,11 @@ verbose = true
 
 [hosts."db.example.com"]
 only = "5432"
+all_users = true
+ignore_process = "^postgres$"
+
+[hosts.web]
+ignore_process = ["^node$", "\\.vscode-server"]
 `), true)
 	if err != nil {
 		t.Fatal(err)
@@ -41,11 +47,15 @@ only = "5432"
 		t.Errorf("devbox: %+v", s)
 	}
 	s = f.For("db.example.com")
-	if s.Only.Spec != "5432" || s.Ignore.Spec != "5432" || s.Interval.Duration != time.Second {
+	if s.Only.Spec != "5432" || s.Ignore.Spec != "5432" || s.Interval.Duration != time.Second ||
+		!*s.AllUsers || !slices.Equal(s.IgnoreProcess.Patterns, []string{"^postgres$"}) {
 		t.Errorf("db: %+v", s)
 	}
+	if s = f.For("web"); !slices.Equal(s.IgnoreProcess.Patterns, []string{"^node$", `\.vscode-server`}) {
+		t.Errorf("web: %+v", s.IgnoreProcess)
+	}
 	s = f.For("other")
-	if s.Interval.Duration != time.Second || s.Verbose != nil {
+	if s.Interval.Duration != time.Second || s.Verbose != nil || s.AllUsers != nil || s.IgnoreProcess != nil {
 		t.Errorf("other: %+v", s)
 	}
 }
@@ -68,7 +78,7 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 }
 
 func TestLoadRejectsBadTypes(t *testing.T) {
-	for _, body := range []string{`interval = "soon"`, `ignore = [true]`, `min_port = "x"`} {
+	for _, body := range []string{`interval = "soon"`, `ignore = [true]`, `min_port = "x"`, `ignore_process = [1]`, `ignore_process = 3`, `all_users = "yes"`} {
 		if _, err := Load(write(t, body), true); err == nil {
 			t.Errorf("%s: no error", body)
 		}

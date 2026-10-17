@@ -10,7 +10,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"regexp"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -48,14 +50,40 @@ Flags:
 `
 
 type options struct {
-	interval   time.Duration
-	minPort    int
-	ignore     string
-	only       string
-	quiet      bool
-	verbose    bool
-	plain      bool
-	configPath string
+	interval      time.Duration
+	minPort       int
+	ignore        string
+	only          string
+	allUsers      bool
+	ignoreProcess patternsFlag
+	quiet         bool
+	verbose       bool
+	plain         bool
+	configPath    string
+}
+
+// patternsFlag collects a repeatable regexp flag. The first use replaces
+// the defaults; an empty value clears the list.
+type patternsFlag struct {
+	list []string
+	set  bool
+}
+
+func (p *patternsFlag) String() string { return strings.Join(p.list, " ") }
+
+func (p *patternsFlag) Set(s string) error {
+	if !p.set {
+		p.list, p.set = nil, true
+	}
+	if s == "" {
+		p.list = nil
+		return nil
+	}
+	if _, err := regexp.Compile(s); err != nil {
+		return err
+	}
+	p.list = append(p.list, s)
+	return nil
 }
 
 func main() {
@@ -104,10 +132,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	var o options
 	o.interval = 2 * time.Second
+	o.ignoreProcess.list = slices.Clone(ports.DefaultIgnoreProcess)
 	fs.Var(durationFlag{&o.interval}, "interval", "how often to poll the remote port table, in seconds or as a `duration` like 500ms")
 	fs.IntVar(&o.minPort, "min-port", 1024, "ignore remote ports below this")
 	fs.StringVar(&o.ignore, "ignore", "", "ports never to forward, e.g. 5432,6379,40000-50000")
-	fs.StringVar(&o.only, "only", "", "forward only these ports (overrides --min-port and --ignore)")
+	fs.StringVar(&o.only, "only", "", "forward only these ports (overrides every other filter)")
+	fs.BoolVar(&o.allUsers, "all-users", false, "also forward ports owned by other users (by default only Docker-style proxies are)")
+	fs.Var(&o.ignoreProcess, "ignore-process", "skip remote processes whose name, command line or systemd unit matches this `regexp`; repeatable, replaces the defaults, empty clears them")
 	fs.BoolVar(&o.quiet, "quiet", false, "log only warnings and errors")
 	fs.BoolVar(&o.quiet, "q", false, "shorthand for --quiet")
 	fs.BoolVar(&o.verbose, "verbose", false, "log connections and diagnostics too")
@@ -166,13 +197,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if o.minPort < 0 || o.minPort > 65535 {
 		return usageError("--min-port must be between 0 and 65535")
 	}
-	filter := ports.Filter{MinPort: uint16(o.minPort)}
+	filter := ports.Filter{MinPort: uint16(o.minPort), AllUsers: o.allUsers}
 	var err error
 	if filter.Ignore, err = ports.ParseSet(o.ignore); err != nil {
 		return usageError("--ignore: %v", err)
 	}
 	if filter.Only, err = ports.ParseSet(o.only); err != nil {
 		return usageError("--only: %v", err)
+	}
+	for _, p := range o.ignoreProcess.list {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return usageError("--ignore-process: %v", err)
+		}
+		filter.IgnoreProcess = append(filter.IgnoreProcess, re)
 	}
 
 	level := logx.Normal
@@ -209,8 +247,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if h.ProxyJump != "" {
 		via = " via " + h.ProxyJump
 	}
-	log.Debugf("  %s is %s@%s:%s%s; filter: min-port %d, ignore %q, only %q",
-		alias, h.User, h.HostName, h.Port, via, filter.MinPort, filter.Ignore, filter.Only)
+	log.Debugf("  %s is %s@%s:%s%s; filter: min-port %d, ignore %q, only %q, all-users %v, ignore-process %q",
+		alias, h.User, h.HostName, h.Port, via, filter.MinPort, filter.Ignore, filter.Only, filter.AllUsers, o.ignoreProcess.list)
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -263,6 +301,12 @@ func applyConfig(o *options, set map[string]bool, alias string) error {
 	}
 	if s.Only != nil && !set["only"] {
 		o.only = s.Only.Spec
+	}
+	if s.AllUsers != nil && !set["all-users"] {
+		o.allUsers = *s.AllUsers
+	}
+	if s.IgnoreProcess != nil && !set["ignore-process"] {
+		o.ignoreProcess.list = s.IgnoreProcess.Patterns
 	}
 	// --quiet and --verbose on the command line override either setting
 	// from the file, so `-v` works even with quiet = true configured.

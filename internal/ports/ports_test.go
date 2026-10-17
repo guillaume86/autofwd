@@ -4,9 +4,11 @@ import (
 	"maps"
 	"net/netip"
 	"os"
+	"regexp"
 	"slices"
 	"testing"
 
+	"github.com/guillaume86/autofwd/internal/procinfo"
 	"github.com/guillaume86/autofwd/internal/procnet"
 )
 
@@ -76,6 +78,52 @@ func TestFilter(t *testing.T) {
 	for _, tt := range tests {
 		if got := tt.f.Allow(tt.port); got != tt.want {
 			t.Errorf("%s: Allow(%d) = %v, want %v", tt.name, tt.port, got, tt.want)
+		}
+	}
+}
+
+func TestProcessReason(t *testing.T) {
+	var ignore []*regexp.Regexp
+	for _, s := range DefaultIgnoreProcess {
+		ignore = append(ignore, regexp.MustCompile(s))
+	}
+	full := procinfo.Env{UID: 1000, OthersVisible: true, Users: map[uint32]string{0: "root"}}
+	proc := func(name, cmdline string) procinfo.Socket {
+		return procinfo.Socket{Proc: &procinfo.Process{Name: name, Cmdline: cmdline}}
+	}
+	mine := procnet.Listener{Port: 3000, UID: 1000, Inode: 1}
+	roots := procnet.Listener{Port: 45747, UID: 0, Inode: 2}
+	noOwner := procnet.Listener{Port: 45747}
+	only, _ := ParseSet("45747")
+	tests := []struct {
+		name string
+		f    Filter
+		l    procnet.Listener
+		s    procinfo.Socket
+		env  procinfo.Env
+		want string
+	}{
+		{"own process", Filter{IgnoreProcess: ignore}, mine, proc("node", "node server.js"), full, ""},
+		{"other user", Filter{}, roots, proc("containerd", "/usr/bin/containerd"), full, "owned by root"},
+		{"other user, unknown process", Filter{}, roots, procinfo.Socket{}, full, "owned by root"},
+		{"other user, unknown name", Filter{}, procnet.Listener{Port: 9, UID: 7, Inode: 3}, procinfo.Socket{}, full, "owned by uid 7"},
+		{"docker proxy names the port", Filter{IgnoreProcess: ignore}, roots,
+			procinfo.Socket{Proc: &procinfo.Process{Name: "docker-proxy", Cmdline: "/usr/bin/docker-proxy -host-port 45747"}, NamesPort: true}, full, ""},
+		{"all users", Filter{AllUsers: true}, roots, proc("containerd", "/usr/bin/containerd"), full, ""},
+		{"all users still ignores processes", Filter{AllUsers: true, IgnoreProcess: ignore}, roots, proc("containerd", "/usr/bin/containerd"), full, "in --ignore-process"},
+		{"uid unknown", Filter{}, roots, procinfo.Socket{}, procinfo.Env{UID: -1, OthersVisible: true}, ""},
+		{"hidepid", Filter{}, roots, procinfo.Socket{}, procinfo.Env{UID: 1000}, ""},
+		{"row without owner", Filter{}, noOwner, procinfo.Socket{}, full, ""},
+		{"ignored by name", Filter{IgnoreProcess: ignore}, mine, proc("tailscaled", "/usr/sbin/tailscaled --tun=userspace-networking"), full, "in --ignore-process"},
+		{"name anchored", Filter{IgnoreProcess: ignore}, mine, proc("tailscaled-helper", "x"), full, ""},
+		{"ignored by command line", Filter{IgnoreProcess: ignore}, mine,
+			proc("node", "/home/u/.vscode-server/cli/servers/Stable-abc/server/node --port 0"), full, "in --ignore-process"},
+		{"ignored by unit", Filter{IgnoreProcess: []*regexp.Regexp{regexp.MustCompile(`^ssh\.socket$`)}}, mine, procinfo.Socket{Unit: "ssh.socket"}, full, "in --ignore-process"},
+		{"only overrides everything", Filter{Only: only, IgnoreProcess: ignore}, roots, proc("containerd", "containerd"), full, ""},
+	}
+	for _, tt := range tests {
+		if got := tt.f.ProcessReason(tt.l, tt.s, tt.env); got != tt.want {
+			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
 		}
 	}
 }

@@ -1,7 +1,7 @@
 // Package sshtest runs a small in-process SSH server for tests. It accepts
-// one public key, answers `cat /proc/net/tcp /proc/net/tcp6` with fake
-// contents, replies to keepalives and serves direct-tcpip to registered
-// in-memory backends.
+// one public key, answers `cat /proc/net/tcp /proc/net/tcp6` and the process
+// lookup (`sh -s`) with fake contents, replies to keepalives and serves
+// direct-tcpip to registered in-memory backends.
 package sshtest
 
 import (
@@ -23,6 +23,9 @@ import (
 // ProcCommand is the command the discovery loop runs.
 const ProcCommand = "cat /proc/net/tcp /proc/net/tcp6"
 
+// ProcInfoCommand runs the process lookup script sent on stdin.
+const ProcInfoCommand = "sh -s"
+
 type Server struct {
 	Addr    string // 127.0.0.1:port
 	Port    int
@@ -33,6 +36,8 @@ type Server struct {
 	cfg      *ssh.ServerConfig
 	mu       sync.Mutex
 	proc     string
+	procInfo func(script string) string
+	lookups  int
 	backends map[string]func(net.Conn)
 	realDial bool
 	mute     bool // ignore keepalives
@@ -94,6 +99,21 @@ func (s *Server) SetProc(data string) {
 	s.mu.Lock()
 	s.proc = data
 	s.mu.Unlock()
+}
+
+// SetProcInfo makes `sh -s` (the process lookup) answer with f's result for
+// the script it receives. Without it, the command fails as unknown.
+func (s *Server) SetProcInfo(f func(script string) string) {
+	s.mu.Lock()
+	s.procInfo = f
+	s.mu.Unlock()
+}
+
+// Lookups counts the process lookups served.
+func (s *Server) Lookups() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lookups
 }
 
 // Handle registers an in-memory service for direct-tcpip to target ("127.0.0.1:3000").
@@ -230,11 +250,21 @@ func (s *Server) session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 		}
 		r.Reply(true, nil)
 		status := uint32(0)
-		if msg.Command == ProcCommand {
+		s.mu.Lock()
+		procInfo := s.procInfo
+		s.mu.Unlock()
+		switch {
+		case msg.Command == ProcCommand:
 			s.mu.Lock()
 			io.WriteString(ch, s.proc)
 			s.mu.Unlock()
-		} else {
+		case msg.Command == ProcInfoCommand && procInfo != nil:
+			script, _ := io.ReadAll(ch) // until the client's EOF
+			s.mu.Lock()
+			s.lookups++
+			s.mu.Unlock()
+			io.WriteString(ch, procInfo(string(script)))
+		default:
 			fmt.Fprintf(ch.Stderr(), "sshtest: unknown command %q\n", msg.Command)
 			status = 127
 		}

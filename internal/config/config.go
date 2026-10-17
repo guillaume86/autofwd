@@ -8,6 +8,7 @@
 //	[hosts.devbox]          # the alias given on the command line
 //	ignore = [5432, 6379, "40000-50000"]
 //	only   = "3000-3999"
+//	ignore_process = ["^tailscaled$", "^bun$"]
 package config
 
 import (
@@ -24,12 +25,14 @@ import (
 
 // Settings holds every flag a config file may set. nil means "not set".
 type Settings struct {
-	Interval *Duration `toml:"interval"`
-	MinPort  *int      `toml:"min_port"`
-	Ignore   *PortList `toml:"ignore"`
-	Only     *PortList `toml:"only"`
-	Quiet    *bool     `toml:"quiet"`
-	Verbose  *bool     `toml:"verbose"`
+	Interval      *Duration    `toml:"interval"`
+	MinPort       *int         `toml:"min_port"`
+	Ignore        *PortList    `toml:"ignore"`
+	Only          *PortList    `toml:"only"`
+	AllUsers      *bool        `toml:"all_users"`
+	IgnoreProcess *PatternList `toml:"ignore_process"`
+	Quiet         *bool        `toml:"quiet"`
+	Verbose       *bool        `toml:"verbose"`
 }
 
 type File struct {
@@ -55,6 +58,12 @@ func (f *File) For(alias string) Settings {
 	}
 	if h.Only != nil {
 		s.Only = h.Only
+	}
+	if h.AllUsers != nil {
+		s.AllUsers = h.AllUsers
+	}
+	if h.IgnoreProcess != nil {
+		s.IgnoreProcess = h.IgnoreProcess
 	}
 	if h.Quiet != nil {
 		s.Quiet = h.Quiet
@@ -125,6 +134,29 @@ func (d *Duration) UnmarshalTOML(v any) error {
 		d.Duration = time.Duration(x * float64(time.Second))
 	default:
 		return fmt.Errorf("want a duration like \"2s\", got %T", v)
+	}
+	return nil
+}
+
+// PatternList accepts one regular expression or an array of them. They are
+// compiled together with the CLI flags.
+type PatternList struct{ Patterns []string }
+
+func (p *PatternList) UnmarshalTOML(v any) error {
+	switch x := v.(type) {
+	case string:
+		p.Patterns = []string{x}
+	case []any:
+		p.Patterns = make([]string, 0, len(x))
+		for _, e := range x {
+			s, ok := e.(string)
+			if !ok {
+				return fmt.Errorf("pattern list entries must be strings, got %T", e)
+			}
+			p.Patterns = append(p.Patterns, s)
+		}
+	default:
+		return fmt.Errorf("want a pattern or an array of patterns, got %T", v)
 	}
 	return nil
 }

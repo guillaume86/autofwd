@@ -2,25 +2,24 @@
 
 `autofwd` forwards remote ports automatically over SSH, the way VS Code Remote-SSH's "auto forwarded ports" does, but without VS Code.
 
-When a process on a remote Linux box starts listening on a TCP port, `autofwd` opens the same port on your machine's `localhost`. When the process stops listening, the local port closes again. It uses a single SSH connection, ships as a single static binary, and needs nothing installed on the remote side.
+When a process on a remote Linux box starts listening on a TCP port, `autofwd` opens the same port on your machine's `localhost`. When the process stops listening, the local port closes again. Each port is shown with the remote process behind it and the directory it runs in. Ports of other users' services (system daemons) are left alone. It uses a single SSH connection, ships as a single static binary, and needs nothing installed on the remote side.
 
 ```
 > autofwd devbox
 12:01:07 connected to devbox
-12:01:07 press s for status, ? for keys
-12:01:07 + 3000  http://localhost:3000
-12:01:07 + 5173  http://localhost:5173  (remote ::1)
-12:03:44 + 8080  http://localhost:8080
+12:01:07 + 3000  http://localhost:3000  node  ~/src/shop
+12:01:07 + 5173  http://localhost:5173  node  ~/src/shop/web  (remote ::1)
+12:03:44 + 8080  http://localhost:8080  python3  ~/src/api
 12:03:51 ! 9229 local port busy: another local process listens on it (retry in 30s)
 12:05:10 - 8080
 12:20:02 - 3000 5173
 12:20:02 disconnected from devbox: no keepalive reply within 15s (reconnect in 1s)
 12:20:05 connected to devbox (down 3s)
-12:20:05 + 3000  http://localhost:3000
-12:20:05 + 5173  http://localhost:5173  (remote ::1)
+12:20:05 + 3000  http://localhost:3000  node  ~/src/shop
+12:20:05 + 5173  http://localhost:5173  node  ~/src/shop/web  (remote ::1)
 ```
 
-On a terminal, the markers are colored and a few keys work while it runs: `s` toggles a status footer (connection state, every forwarded port with its URL, age and open connections, busy and skipped ports), `o` opens the newest port in your browser, `1`–`9` open a row of the status list, `v` toggles verbose logging, `r` polls right now and retries busy ports, `q` quits. When output is piped, or with `--log`, it is a plain log with no colors or keys.
+On a terminal, the markers are colored and a status footer stays below the log. It shows the connection state, every forwarded port with its URL, age, open connections and remote process, and the busy and skipped ports. A few keys work while it runs: `o` opens the newest port in your browser, `1`–`9` open a row of the status list, `r` polls right now and retries busy ports, `v` toggles verbose logging, `q` quits. When output is piped, or with `--log`, it is a plain log with no colors, footer or keys.
 
 Services are reached at `http://localhost:<port>`, on the same port number as on the remote host. That matters for two reasons:
 
@@ -52,7 +51,7 @@ To cross-compile, set `GOOS`/`GOARCH` (for example `GOOS=windows GOARCH=arm64`),
 
 ### Remote host requirements
 
-- Linux with `/proc` mounted (any distribution; no packages needed, not even `ss` or iproute2).
+- Linux with `/proc` mounted (any distribution; no packages needed, not even `ss` or iproute2). Process names and the owner rule also use `sh`, `ls`, `cat`, `grep`, `head`, `cut` and `id`, which every distribution has, BusyBox-based ones included. See [Remote processes](#remote-processes).
 - A little-endian CPU: x86-64, arm64, riscv64. See [Known limitations](#known-limitations).
 - Public-key login. Password and keyboard-interactive authentication aren't supported.
 - `sshd` must allow running commands and local forwarding: no `ForceCommand` for your user, and `AllowTcpForwarding` set to `yes` or `local` (the default is `yes`).
@@ -71,7 +70,9 @@ autofwd [flags] [user@]<host>
 | `--interval` | `2s` | How often to read the remote port table. Seconds (`5`) or a duration (`500ms`). |
 | `--min-port` | `1024` | Ignore remote ports below this. |
 | `--ignore` | | Ports never to forward, for example `5432,6379,40000-50000`. |
-| `--only` | | Allowlist. When set, it replaces `--min-port` and `--ignore`. |
+| `--only` | | Allowlist. When set, it replaces every other filter: `--min-port`, `--ignore`, the owner rule and `--ignore-process`. |
+| `--all-users` | | Also forward ports owned by other users. By default only your own ports are forwarded, plus ports of Docker-style proxies. See [Remote processes](#remote-processes). |
+| `--ignore-process` | see below | Never forward a port whose remote process name, command line or systemd unit matches this regular expression. Repeat it for several patterns. It replaces the default list; `--ignore-process=` clears it. |
 | `-q`, `--quiet` | | Log only warnings (`!` lines) and connection state (`connected`/`disconnected`). |
 | `-v`, `--verbose` | | Also log each proxied connection, keepalives and diagnostics. |
 | `--log` | | Plain log: no colors, keys or status footer. Automatic when stderr or stdin is not a terminal. |
@@ -84,7 +85,7 @@ Press Ctrl+C to close every listener and the SSH connection, then exit. A second
 
 | Line | Meaning |
 |---|---|
-| `+ 3000  http://localhost:3000` | The port is now forwarded; the URL is what to open. `(remote ::1)` or `(remote 10.0.0.5)` is added when the remote side is dialed somewhere other than `127.0.0.1`. |
+| `+ 3000  http://localhost:3000  node  ~/src/shop` | The port is now forwarded; the URL is what to open. Then come the remote process and its working directory, when known (the directory only for your own processes). `(remote ::1)` or `(remote 10.0.0.5)` is added when the remote side is dialed somewhere other than `127.0.0.1`. |
 | `- 3000` | The forward was removed. Connections already open on it finish normally. On a disconnect, one line lists every port: `- 3000 5173`. |
 | `~ 3000  remote listener moved to [::1]:3000` | The remote listener changed address; the local listener stays. |
 | `! 8080 local port busy: reason (retry in 30s)` | Something on your machine already uses that port, so it is skipped. See [Busy ports](#busy-ports). |
@@ -114,9 +115,13 @@ ignore = [5432, 6379, "40000-50000"]   # string or array, either works
 [hosts."db.example.com"]
 only = "5432"
 quiet = true
+
+[hosts.buildbox]
+all_users = true
+ignore_process = ["^tailscaled$", "^containerd$", "^bun$"]   # replaces the default list
 ```
 
-The keys are `interval` (a string like `"500ms"`, or a number of seconds), `min_port`, `ignore`, `only`, `quiet` and `verbose`. An unknown key is an error, so typos don't go unnoticed.
+The keys are `interval` (a string like `"500ms"`, or a number of seconds), `min_port`, `ignore`, `only`, `all_users`, `ignore_process` (one pattern or an array; an empty array clears the defaults), `quiet` and `verbose`. An unknown key is an error, so typos don't go unnoticed.
 
 ## How it works
 
@@ -138,6 +143,30 @@ Each listening socket determines the address autofwd dials on the remote side:
 | `::1` | `::1`, but only if no IPv4 socket listens on that port |
 | any other specific address | that address |
 | link-local `fe80::` | not forwarded: the kernel table doesn't record the interface, so the address can't be dialed |
+
+### Remote processes
+
+When a listening socket shows up that autofwd hasn't seen before, and its port passes `--min-port`, `--ignore` and `--only`, autofwd finds the process behind it. It runs a short POSIX `sh` script, sent on stdin to `sh -s` so that a non-POSIX login shell such as fish doesn't matter. The script prints raw data and autofwd parses it:
+
+- `ls -l /proc/*/fd/` maps each socket to the processes holding it. This only works for your own processes. When a forked server's children hold the socket too, the parent is named.
+- `/proc/*/stat`, `/proc/*/cmdline` and `/proc/*/cwd` give each process's name, command line and working directory. Any user can read the first two; the working directory only for your own processes.
+- `ss -tlne`, if iproute2 is installed, gives each socket's cgroup, which on a systemd host is its unit, other users' sockets included. A unit with a single process (for example `containerd.service`) identifies it exactly.
+- Otherwise, a process whose command line contains the port number as a whole number is taken as the owner. This is VS Code's heuristic, and it catches Docker's `docker-proxy -host-port 5432`.
+
+The lookup runs once per new socket, before the port is forwarded, so an excluded port never shows up even briefly. On an Ubuntu desktop it takes about 40 ms on the remote side.
+
+Two rules then decide whether the port is forwarded:
+
+1. **Owner.** A socket owned by another user, root included, is skipped, unless a process's command line names its port (Docker-published ports). `--all-users` turns this off. The socket's owner comes straight from `/proc/net/tcp`; the exception needs other users' command lines to be readable.
+2. **`--ignore-process`.** Each pattern is a Go regular expression matched against the process name, its full command line and its systemd unit. The default list skips daemons that listen on random high ports for their own use, plus editor servers that already do their own forwarding:
+
+   ```
+   ^tailscaled$  ^containerd$  ^dockerd$  ^sshd$  /\.(vscode|cursor|windsurf)-server
+   ```
+
+`--only` overrides both. Skipped ports are listed in the status footer with the reason (`45747 containerd (owned by root)`); with `-v`, each is logged once.
+
+**Everything here degrades to the previous behavior.** If the script fails or a tool is missing, ports are forwarded without a label. If your uid can't be determined, or other users' processes are hidden (`/proc` mounted with `hidepid`), the owner rule is off. A pattern can't match a process that couldn't be identified. With `-v`, the first lookup on each connection logs what was detected, for example `process info: uid 1000, other users' processes visible, socket cgroups from ss`. After three failed lookups in a row, autofwd stops trying until the next reconnect.
 
 ### Forwarding
 
@@ -230,7 +259,10 @@ autofwd never accepts an unknown or changed key:
 - **`Match exec` and other `Match` criteria** (`user`, `localuser`, `canonical`, …) make `ssh_config` parsing fail. autofwd reports the error instead of silently ignoring a config it can't read.
 - **Remote host must be Linux** (it needs `/proc/net/tcp`). The remote CPU must be little-endian, which covers x86-64, arm64 and riscv64. On big-endian hosts such as s390x, addresses would be decoded byte-swapped.
 - **Each poll runs `cat` through your login shell.** Startup files such as `.bashrc` therefore run every couple of seconds. Output they print is tolerated (rows that don't parse are skipped), but slow startup files slow down discovery.
-- **Detection latency** is up to one `--interval`. Only TCP is forwarded.
+- **Detection latency** is up to one `--interval`, plus one process lookup for a new socket. Only TCP is forwarded.
+- **Logging in as root** makes every socket "yours", so the owner rule skips nothing; only `--ignore-process` applies.
+- **Other users' services that don't name their port** in their command line (an nginx or Postgres configured through a file, running as its own user) are skipped by the owner rule. Use `--all-users`, or `--only` for specific ports.
+- **The process name is the kernel's** (`comm`, at most 15 characters), so an interpreter shows as `node` or `python3`. Patterns that need more can match the full command line.
 - **A link-local IPv6 listener** (`fe80::…`) is never forwarded, because the kernel table doesn't record its interface. **A listener bound only to `::` with `IPV6_V6ONLY`** is dialed as `127.0.0.1` and refuses the connection. Bind such a service to `::1` explicitly.
 - **Ports below 1024** aren't forwarded by default. If you allow them with `--only`, Linux and macOS need privileges to bind them locally.
 - **On Windows, ports inside an excluded range** reserved by Hyper-V, WSL or Docker (`netsh int ipv4 show excludedportrange protocol=tcp`) are reported as busy.
@@ -252,16 +284,17 @@ CGO_ENABLED=1 go test -race ./...    # the race detector needs a C toolchain
 |---|---|
 | `cmd/autofwd` | Flags, config-file merging, signal handling. |
 | `internal/procnet` | `/proc/net/tcp{,6}` parser. Fixtures are in `testdata/`. |
-| `internal/ports` | Port lists, filtering, choosing the remote dial address. |
+| `internal/procinfo` | The remote process lookup script and the parser for its output. Fixtures from Ubuntu and BusyBox are in `testdata/`; on Linux, a test also runs the script for real. |
+| `internal/ports` | Port lists, filtering (port, owner and process rules), choosing the remote dial address. |
 | `internal/forward` | Local listeners, the busy-port policy, the two-way copy with half-close. |
 | `internal/sshconn` | `ssh_config`, agent and key-file auth, known_hosts, ProxyJump. |
 | `internal/supervisor` | Connection lifecycle: discovery loop, keepalive, reconnect with backoff. |
-| `internal/sshtest` | In-process SSH server for tests: fake `/proc`, `direct-tcpip`, keepalive control. |
+| `internal/sshtest` | In-process SSH server for tests: fake `/proc` and process lookups, `direct-tcpip`, keepalive control. |
 | `internal/config` | The optional TOML config file and its per-host precedence. |
 | `internal/ui` | Terminal layer: colored log sink with the status footer, raw-mode keys, passphrase prompt, open-in-browser. |
 | `internal/logx` | One-line-per-event leveled logger. |
 
-The integration tests in `internal/supervisor` and `internal/sshconn` start a real SSH server in the test process. They exercise the actual client code end to end: config resolution, host-key verification, auth, discovery, forwarding, half-close, busy ports, keepalive timeout, reconnect and ProxyJump chains.
+The integration tests in `internal/supervisor` and `internal/sshconn` start a real SSH server in the test process. They exercise the actual client code end to end: config resolution, host-key verification, auth, discovery, process rules and labels, forwarding, half-close, busy ports, keepalive timeout, reconnect and ProxyJump chains.
 
 ### Dependencies
 

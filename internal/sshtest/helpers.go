@@ -80,7 +80,12 @@ type Row struct {
 	Local  string // "0.0.0.0:3000", "[::1]:3000"
 	Remote string // optional, defaults to the wildcard
 	State  string // "0A" for LISTEN, "01" ESTABLISHED, ...
+	UID    *uint32
+	Inode  uint64 // default 100000 + the local port
 }
+
+// UID is a helper for Row.UID; rows without one are owned by uid 1000.
+func UID(n uint32) *uint32 { return &n }
 
 // ProcTables renders rows as `cat /proc/net/tcp /proc/net/tcp6` would.
 func ProcTables(rows ...Row) string {
@@ -97,8 +102,15 @@ func ProcTables(rows ...Row) string {
 		if r.Remote != "" {
 			remote = netip.MustParseAddrPort(r.Remote)
 		}
-		line := fmt.Sprintf("%s %s %s 00000000:00000000 00:00000000 00000000  1000        0 4242 1 0000000000000000 100 0 0 10 0\n",
-			encode(local), encode(remote), r.State)
+		uid, inode := uint32(1000), r.Inode
+		if r.UID != nil {
+			uid = *r.UID
+		}
+		if inode == 0 {
+			inode = 100000 + uint64(local.Port())
+		}
+		line := fmt.Sprintf("%s %s %s 00000000:00000000 00:00000000 00000000 %5d        0 %d 1 0000000000000000 100 0 0 10 0\n",
+			encode(local), encode(remote), r.State, uid, inode)
 		if local.Addr().Is4() {
 			fmt.Fprintf(&v4, "%4d: %s", n4, line)
 			n4++

@@ -33,9 +33,9 @@ func formatStatus(st supervisor.Status, width int, now time.Time) []string {
 	if !narrow && st.State == supervisor.Connected && !st.LastKeepalive.IsZero() {
 		head += fmt.Sprintf("   keepalive %s ago", fmtAge(now.Sub(st.LastKeepalive)))
 	}
-	hints := "[s]hide [v]erbose [o]pen [r]efresh [q]uit"
+	hints := "[o]pen [1-9] [r]efresh [v]erbose [q]uit"
 	if narrow {
-		hints = "[s] [v] [o] [r] [q]"
+		hints = "[o] [1-9] [r] [v] [q]"
 	}
 	lines = append(lines, padBetween(head, hints, width))
 	if st.State != supervisor.Connected && st.LastError != "" {
@@ -47,7 +47,7 @@ func formatStatus(st supervisor.Status, width int, now time.Time) []string {
 		lines = append(lines, "   no ports forwarded yet")
 	}
 	if len(st.Forwards) > 0 && !narrow {
-		lines = append(lines, fmt.Sprintf("  %-2s %-6s %-24s %-16s %-7s %s", "#", "PORT", "LOCAL URL", "REMOTE", "AGE", "CONNS"))
+		lines = append(lines, fmt.Sprintf("  %-2s %-6s %-24s %-16s %-7s %-5s %s", "#", "PORT", "LOCAL URL", "REMOTE", "AGE", "CONNS", "PROCESS"))
 	}
 	for i, f := range st.Forwards {
 		if i == maxStatusRows {
@@ -61,10 +61,15 @@ func formatStatus(st supervisor.Status, width int, now time.Time) []string {
 			if f.Target.Addr().String() != "127.0.0.1" {
 				remote = " " + f.Target.Addr().String()
 			}
-			lines = append(lines, fmt.Sprintf("  %d %-5d %s%s  %s  %d", i+1, f.Port, url, remote, age, f.Conns))
+			row := fmt.Sprintf("  %d %-5d %s%s  %s  %d", i+1, f.Port, url, remote, age, f.Conns)
+			if f.Label != "" {
+				row += "  " + f.Label
+			}
+			lines = append(lines, truncate(row, width))
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("  %-2d %-6d %-24s %-16s %-7s %d", i+1, f.Port, url, f.Target.Addr(), age, f.Conns))
+		row := fmt.Sprintf("  %-2d %-6d %-24s %-16s %-7s %-5d %s", i+1, f.Port, url, f.Target.Addr(), age, f.Conns, f.Label)
+		lines = append(lines, truncate(strings.TrimRight(row, " "), width))
 	}
 
 	// Busy ports.
@@ -80,19 +85,30 @@ func formatStatus(st supervisor.Status, width int, now time.Time) []string {
 		}
 	}
 
-	// Skipped ports, grouped by reason on one line.
+	// Skipped ports, grouped by reason on one line. Ports skipped for their
+	// process carry its name: "45747 containerd, 59041 tailscaled".
 	if len(st.Skipped) > 0 {
 		groups := make(map[string][]string)
+		named := make(map[string]bool)
 		var order []string
 		for _, s := range st.Skipped {
 			if _, ok := groups[s.Reason]; !ok {
 				order = append(order, s.Reason)
 			}
-			groups[s.Reason] = append(groups[s.Reason], fmt.Sprint(s.Port))
+			item := fmt.Sprint(s.Port)
+			if s.Process != "" {
+				item += " " + s.Process
+				named[s.Reason] = true
+			}
+			groups[s.Reason] = append(groups[s.Reason], item)
 		}
 		var parts []string
 		for _, r := range order {
-			parts = append(parts, strings.Join(groups[r], " ")+" ("+r+")")
+			sep := " "
+			if named[r] {
+				sep = ", "
+			}
+			parts = append(parts, strings.Join(groups[r], sep)+" ("+r+")")
 		}
 		lines = append(lines, truncate("     skipped: "+strings.Join(parts, "   "), width))
 	}

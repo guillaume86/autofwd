@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 
 	"github.com/guillaume86/autofwd/internal/logx"
 	"github.com/guillaume86/autofwd/internal/ports"
+	"github.com/guillaume86/autofwd/internal/procinfo"
 	"github.com/guillaume86/autofwd/internal/sshconn"
 	"github.com/guillaume86/autofwd/internal/sshtest"
 )
@@ -27,6 +31,7 @@ func echo(c net.Conn) {
 type harness struct {
 	t      *testing.T
 	srv    *sshtest.Server
+	sup    *Supervisor
 	logs   *sshtest.LogBuffer
 	cancel context.CancelFunc
 	done   chan error
@@ -74,8 +79,8 @@ func setup(t *testing.T, so setupOpts) *harness {
 		so.tweak(&o)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	h := &harness{t: t, srv: srv, logs: logs, cancel: cancel, done: make(chan error, 1)}
-	go func() { h.done <- New(o).Run(ctx) }()
+	h := &harness{t: t, srv: srv, sup: New(o), logs: logs, cancel: cancel, done: make(chan error, 1)}
+	go func() { h.done <- h.sup.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -243,6 +248,127 @@ func TestEndToEnd(t *testing.T) {
 	}
 	if listening(hp("127.0.0.1", pV6)) || listening(hp("127.0.0.1", pHalf)) {
 		t.Error("listeners survived shutdown")
+	}
+}
+
+// procInfoOutput fakes the lookup script's output for TestProcessRules.
+// containerd's root-owned socket is attributed through its cgroup, the
+// Docker one through the port in docker-proxy's command line.
+func procInfoOutput(pContainerd, pDocker uint16) string {
+	return "@@autofwd id\n1000\n/home/tester\n" +
+		fmt.Sprintf("@@autofwd ss\nLISTEN 0 4096 127.0.0.1:%d 0.0.0.0:* ino:13 sk:1 cgroup:/system.slice/containerd.service <->\n", pContainerd) +
+		"@@autofwd cgroup\n==> /dev/null <==\n\n==> /proc/300/cgroup <==\n0::/system.slice/containerd.service\n\n" +
+		"==> /proc/301/cgroup <==\n0::/system.slice/docker.service\n" +
+		"@@autofwd passwd\nroot:0\ntester:1000\n" +
+		"@@autofwd fd\n/proc/200/fd/:\nl 3 -> socket:[11]\n/proc/201/fd/:\nl 3 -> socket:[12]\n/proc/202/fd/:\nl 3 -> socket:[15]\n" +
+		"@@autofwd cwd\nl /proc/200/cwd -> /home/tester/app\nl /proc/201/cwd -> /home/tester\nl /proc/202/cwd -> /srv\n" +
+		"@@autofwd stat\n1 (init) S 0\n200 (node) S 1\n201 (tailscaled) S 1\n202 (python3) S 1\n300 (containerd) S 1\n301 (docker-proxy) S 1\n" +
+		"@@autofwd cmdline\n==> /dev/null <==\n\n" +
+		"==> /proc/1/cmdline <==\n/sbin/init\x00\n" +
+		"==> /proc/200/cmdline <==\nnode\x00server.js\x00\n" +
+		"==> /proc/201/cmdline <==\n/usr/sbin/tailscaled\x00--tun=userspace-networking\x00\n" +
+		"==> /proc/202/cmdline <==\npython3\x00-m\x00http.server\x00\n" +
+		"==> /proc/300/cmdline <==\n/usr/bin/containerd\x00\n" +
+		fmt.Sprintf("==> /proc/301/cmdline <==\n/usr/bin/docker-proxy\x00-host-port\x00%d\x00\n", pDocker) +
+		"@@autofwd end\n"
+}
+
+func TestProcessRules(t *testing.T) {
+	if procinfo.Command != sshtest.ProcInfoCommand {
+		t.Fatalf("test server answers %q, supervisor runs %q", sshtest.ProcInfoCommand, procinfo.Command)
+	}
+	var ignore []*regexp.Regexp
+	for _, s := range ports.DefaultIgnoreProcess {
+		ignore = append(ignore, regexp.MustCompile(s))
+	}
+	h := setup(t, setupOpts{tweak: func(o *Options) { o.Filter.IgnoreProcess = ignore }})
+	pNode, pTail, pContainerd, pDocker, pLater := sshtest.FreePort(t), sshtest.FreePort(t), sshtest.FreePort(t), sshtest.FreePort(t), sshtest.FreePort(t)
+	var mu sync.Mutex
+	var scripts []string
+	h.srv.SetProcInfo(func(script string) string {
+		mu.Lock()
+		scripts = append(scripts, script)
+		mu.Unlock()
+		return procInfoOutput(pContainerd, pDocker)
+	})
+	h.srv.Handle(hp("127.0.0.1", pNode), echo)
+	h.srv.Handle(hp("127.0.0.1", pDocker), echo)
+	rows := []sshtest.Row{
+		{Local: hp("0.0.0.0", pNode), State: "0A", Inode: 11},
+		{Local: hp("0.0.0.0", pTail), State: "0A", Inode: 12},
+		{Local: hp("127.0.0.1", pContainerd), State: "0A", Inode: 13, UID: sshtest.UID(0)},
+		{Local: hp("0.0.0.0", pDocker), State: "0A", Inode: 14, UID: sshtest.UID(0)},
+		{Local: "0.0.0.0:22", State: "0A", Inode: 16, UID: sshtest.UID(0)}, // below --min-port: never looked up
+	}
+	h.srv.SetProc(sshtest.ProcTables(rows...))
+
+	sshtest.Eventually(t, 5*time.Second, "forwards to appear", func() bool {
+		return listening(hp("127.0.0.1", pNode)) && listening(hp("127.0.0.1", pDocker))
+	})
+	dialExchange(t, hp("127.0.0.1", pDocker), "published by docker")
+	for _, want := range []string{
+		fmt.Sprintf("+ %d  http://localhost:%d  node  ~/app\n", pNode, pNode),
+		fmt.Sprintf("+ %d  http://localhost:%d  docker-proxy\n", pDocker, pDocker),
+		"process info: uid 1000, other users' processes visible, socket cgroups from ss",
+		fmt.Sprintf("not forwarding %d tailscaled: in --ignore-process", pTail),
+		fmt.Sprintf("not forwarding %d containerd: owned by root", pContainerd),
+	} {
+		if !strings.Contains(h.logs.String(), want) {
+			t.Errorf("logs lack %q", want)
+		}
+	}
+	if listening(hp("127.0.0.1", pTail)) || listening(hp("127.0.0.1", pContainerd)) {
+		t.Error("forwarded an excluded port")
+	}
+	st := h.sup.Status()
+	want := []Skipped{{Port: 22, Reason: "below --min-port 1024"}, {Port: pTail, Reason: "in --ignore-process", Process: "tailscaled"}, {Port: pContainerd, Reason: "owned by root", Process: "containerd"}}
+	slices.SortFunc(want, func(a, b Skipped) int { return int(a.Port) - int(b.Port) })
+	if !slices.Equal(st.Skipped, want) {
+		t.Errorf("skipped = %+v\nwant      %+v", st.Skipped, want)
+	}
+	for _, f := range st.Forwards {
+		if f.Port == pNode && f.Label != "node  ~/app" {
+			t.Errorf("status label %q", f.Label)
+		}
+	}
+
+	// Known sockets are not looked up again on later polls.
+	n := h.srv.Lookups()
+	time.Sleep(10 * 30 * time.Millisecond) // ten polls
+	if got := h.srv.Lookups(); got != n {
+		t.Errorf("%d lookups for unchanged sockets", got-n)
+	}
+	mu.Lock()
+	if len(scripts) == 0 || strings.Contains(scripts[0], "socket:[16]") || !strings.Contains(scripts[0], "socket:[11]") {
+		t.Errorf("first lookup asked for the wrong inodes:\n%s", scripts[0])
+	}
+	mu.Unlock()
+
+	// A new socket triggers one lookup, for that socket only.
+	h.srv.Handle(hp("127.0.0.1", pLater), echo)
+	h.srv.SetProc(sshtest.ProcTables(append(rows, sshtest.Row{Local: hp("0.0.0.0", pLater), State: "0A", Inode: 15})...))
+	sshtest.Eventually(t, 5*time.Second, "new forward", func() bool { return listening(hp("127.0.0.1", pLater)) })
+	if !strings.Contains(h.logs.String(), fmt.Sprintf("+ %d  http://localhost:%d  python3  /srv\n", pLater, pLater)) {
+		t.Error("new port not labeled")
+	}
+	mu.Lock()
+	last := scripts[len(scripts)-1]
+	mu.Unlock()
+	if !strings.Contains(last, "socket:[15]") || strings.Contains(last, "socket:[11]") {
+		t.Errorf("second lookup asked for the wrong inodes:\n%s", last)
+	}
+}
+
+func TestProcessRulesNeedVisibility(t *testing.T) {
+	// hidepid: other users' processes are invisible, so a Docker port could
+	// not be recognized. Root's sockets are then forwarded, as before.
+	h := setup(t, setupOpts{})
+	pRoot := sshtest.FreePort(t)
+	h.srv.SetProcInfo(func(string) string { return "@@autofwd id\n1000\n/home/tester\n@@autofwd end\n" })
+	h.srv.SetProc(sshtest.ProcTables(sshtest.Row{Local: hp("0.0.0.0", pRoot), State: "0A", UID: sshtest.UID(0)}))
+	sshtest.Eventually(t, 5*time.Second, "forward", func() bool { return listening(hp("127.0.0.1", pRoot)) })
+	if !strings.Contains(h.logs.String(), "other users' processes hidden") {
+		t.Error("detection not logged")
 	}
 }
 

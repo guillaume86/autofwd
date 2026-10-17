@@ -17,32 +17,36 @@ func sampleStatus(now time.Time) supervisor.Status {
 		Since:         now.Add(-(2*time.Hour + 14*time.Minute)),
 		LastKeepalive: now.Add(-12 * time.Second),
 		Forwards: []forward.PortStatus{
-			{Port: 3000, Target: netip.MustParseAddrPort("127.0.0.1:3000"), Since: now.Add(-90 * time.Minute), Conns: 3},
+			{Port: 3000, Target: netip.MustParseAddrPort("127.0.0.1:3000"), Label: "node  ~/src/app", Since: now.Add(-90 * time.Minute), Conns: 3},
 			{Port: 5173, Target: netip.MustParseAddrPort("[::1]:5173"), Since: now.Add(-40 * time.Second), Conns: 0},
 		},
-		Busy:    []forward.BusyStatus{{Port: 9229, Reason: "local port busy: another local process listens on it", RetryAt: now.Add(18 * time.Second)}},
-		Skipped: []supervisor.Skipped{{Port: 22, Reason: "below --min-port 1024"}, {Port: 631, Reason: "below --min-port 1024"}, {Port: 5432, Reason: "in --ignore"}},
+		Busy: []forward.BusyStatus{{Port: 9229, Reason: "local port busy: another local process listens on it", RetryAt: now.Add(18 * time.Second)}},
+		Skipped: []supervisor.Skipped{
+			{Port: 22, Reason: "below --min-port 1024"}, {Port: 631, Reason: "below --min-port 1024"}, {Port: 5432, Reason: "in --ignore"},
+			{Port: 45747, Reason: "owned by root", Process: "containerd"}, {Port: 59041, Reason: "owned by root", Process: "tailscaled"},
+		},
 	}
 }
 
 func TestFormatStatusWide(t *testing.T) {
 	now := time.Now()
-	lines := formatStatus(sampleStatus(now), 100, now)
+	lines := formatStatus(sampleStatus(now), 130, now)
 	out := strings.Join(lines, "\n")
 	t.Log("\n" + out)
 	for _, want := range []string{
-		"devbox  ● connected 2h14m", "keepalive 12s ago", "[s]hide",
-		"1  3000   http://localhost:3000    127.0.0.1        1h30m   3",
-		"2  5173   http://localhost:5173    ::1              40s     0",
+		"devbox  ● connected 2h14m", "keepalive 12s ago", "[o]pen [1-9] [r]efresh [v]erbose [q]uit",
+		"CONNS PROCESS",
+		"1  3000   http://localhost:3000    127.0.0.1        1h30m   3     node  ~/src/app\n",
+		"2  5173   http://localhost:5173    ::1              40s     0\n",
 		"9229   — busy", "retry in 18s", "another local process",
-		"skipped: 22 631 (below --min-port 1024)   5432 (in --ignore)",
+		"skipped: 22 631 (below --min-port 1024)   5432 (in --ignore)   45747 containerd, 59041 tailscaled (owned by root)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("wide output lacks %q", want)
 		}
 	}
 	for i, l := range lines {
-		if n := len([]rune(l)); n > 100 {
+		if n := len([]rune(l)); n > 130 {
 			t.Errorf("line %d is %d wide: %q", i, n, l)
 		}
 	}
@@ -53,7 +57,7 @@ func TestFormatStatusNarrow(t *testing.T) {
 	lines := formatStatus(sampleStatus(now), 60, now)
 	out := strings.Join(lines, "\n")
 	t.Log("\n" + out)
-	for _, want := range []string{"[s] [v] [o] [r] [q]", "1 3000  http://localhost:3000  1h30m  3", "2 5173  http://localhost:5173 ::1  40s  0", "9229  busy, retry in 18s"} {
+	for _, want := range []string{"[o] [1-9] [r] [v] [q]", "1 3000  http://localhost:3000  1h30m  3  node  ~/src/app", "2 5173  http://localhost:5173 ::1  40s  0", "9229  busy, retry in 18s"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("narrow output lacks %q", want)
 		}

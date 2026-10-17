@@ -27,11 +27,27 @@ func listeners(t *testing.T, pairs ...string) []Listener {
 	return out
 }
 
+// addrsOnly drops the owner columns so tests can compare addresses alone.
+func addrsOnly(ls []Listener) []Listener {
+	out := make([]Listener, len(ls))
+	for i, l := range ls {
+		out[i] = Listener{Addr: l.Addr, Port: l.Port}
+	}
+	return out
+}
+
 func TestParseTCP4(t *testing.T) {
 	got, err := Parse(mustRead(t, "tcp"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if l := got[0]; l.UID != 1000 || l.Inode != 41234 || !l.HasOwner() {
+		t.Errorf("first row owner = uid %d inode %d, want 1000 41234", l.UID, l.Inode)
+	}
+	if l := got[3]; l.UID != 0 || l.Inode != 20114 {
+		t.Errorf("sshd row owner = uid %d inode %d, want 0 20114", l.UID, l.Inode)
+	}
+	got = addrsOnly(got)
 	want := listeners(t,
 		"127.0.0.1:3000",
 		"0.0.0.0:8080",
@@ -50,6 +66,10 @@ func TestParseTCP6(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if got[0].Inode != 52011 {
+		t.Errorf("first row inode = %d, want 52011", got[0].Inode)
+	}
+	got = addrsOnly(got)
 	want := listeners(t,
 		"[::]:4000",
 		"[::1]:5001",
@@ -91,8 +111,8 @@ func TestParseZone(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []Listener{
-		{Addr: netip.MustParseAddr("fe80::20f:1eff:feb8:a595%eth0"), Port: 8000},
-		{Addr: netip.MustParseAddr("127.0.0.1"), Port: 6001},
+		{Addr: netip.MustParseAddr("fe80::20f:1eff:feb8:a595%eth0"), Port: 8000, UID: 1000, Inode: 1},
+		{Addr: netip.MustParseAddr("127.0.0.1"), Port: 6001, UID: 1000, Inode: 1},
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("got  %v\nwant %v", got, want)

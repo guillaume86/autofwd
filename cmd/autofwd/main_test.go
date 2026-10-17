@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/guillaume86/autofwd/internal/ports"
 )
 
 func TestUsageErrors(t *testing.T) {
@@ -20,6 +23,7 @@ func TestUsageErrors(t *testing.T) {
 		{"--config", cfg, "--only", "1-0", "host"},
 		{"--config", cfg, "--interval", "1ms", "host"},
 		{"--config", cfg, "--min-port", "70000", "host"},
+		{"--config", cfg, "--ignore-process", "(unclosed", "host"},
 		{"--nope", "host"},
 		{"--config", filepath.Join(t.TempDir(), "missing.toml"), "host"},
 	} {
@@ -63,6 +67,52 @@ ignore = [5432, "40000-50000"]
 	}
 	if o.interval != time.Second || o.minPort != 1024 || o.ignore != "1" || o.quiet || !o.verbose {
 		t.Errorf("flags over file: %+v", o)
+	}
+}
+
+func TestIgnoreProcessPrecedence(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "config.toml")
+	os.WriteFile(cfg, []byte("all_users = true\n[hosts.devbox]\nignore_process = [\"^bun$\"]\n"), 0o600)
+
+	// Defaults when nothing sets it.
+	var o options
+	o.ignoreProcess.list = slices.Clone(ports.DefaultIgnoreProcess)
+	o.configPath = cfg
+	if err := applyConfig(&o, map[string]bool{}, "other"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(o.ignoreProcess.list, ports.DefaultIgnoreProcess) || !o.allUsers {
+		t.Errorf("defaults: %+v", o)
+	}
+
+	// The config file replaces the defaults.
+	o.ignoreProcess.list = slices.Clone(ports.DefaultIgnoreProcess)
+	if err := applyConfig(&o, map[string]bool{}, "devbox"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(o.ignoreProcess.list, []string{"^bun$"}) {
+		t.Errorf("from file: %q", o.ignoreProcess.list)
+	}
+
+	// Flags replace both; repeating appends; an empty value clears.
+	p := patternsFlag{list: slices.Clone(ports.DefaultIgnoreProcess)}
+	for _, v := range []string{"^a$", "^b$"} {
+		if err := p.Set(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slices.Equal(p.list, []string{"^a$", "^b$"}) {
+		t.Errorf("repeated flag: %q", p.list)
+	}
+	o = options{ignoreProcess: p, configPath: cfg}
+	if err := applyConfig(&o, map[string]bool{"ignore-process": true}, "devbox"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(o.ignoreProcess.list, []string{"^a$", "^b$"}) {
+		t.Errorf("flag over file: %q", o.ignoreProcess.list)
+	}
+	if err := p.Set(""); err != nil || len(p.list) != 0 {
+		t.Errorf("empty value: %q, %v", p.list, err)
 	}
 }
 

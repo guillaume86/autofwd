@@ -94,8 +94,8 @@ func freePort(t *testing.T) uint16 {
 	return 0
 }
 
-func target(p uint16) map[uint16]netip.AddrPort {
-	return map[uint16]netip.AddrPort{p: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), p)}
+func target(p uint16) map[uint16]Target {
+	return map[uint16]Target{p: {Addr: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), p)}}
 }
 
 func roundTrip(t *testing.T, addr, msg string) {
@@ -297,13 +297,40 @@ func TestBusyOnIPv6OnlyIsDetected(t *testing.T) {
 	l.Close()
 }
 
+func TestDescribe(t *testing.T) {
+	for _, tt := range []struct {
+		t    Target
+		want string
+	}{
+		{Target{Addr: netip.MustParseAddrPort("127.0.0.1:3000")}, "+ 3000  http://localhost:3000"},
+		{Target{Addr: netip.MustParseAddrPort("127.0.0.1:3000"), Label: "node  ~/app"}, "+ 3000  http://localhost:3000  node  ~/app"},
+		{Target{Addr: netip.MustParseAddrPort("[::1]:3000"), Label: "vite"}, "+ 3000  http://localhost:3000  vite  (remote ::1)"},
+	} {
+		if got := describe(3000, tt.t); got != tt.want {
+			t.Errorf("describe = %q, want %q", got, tt.want)
+		}
+	}
+}
+
+func TestLabelUpdatesInPlace(t *testing.T) {
+	m := New(&fakeRemote{handler: echo}, Options{})
+	defer m.Close()
+	p := freePort(t)
+	addr := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), p)
+	m.Sync(map[uint16]Target{p: {Addr: addr}})
+	m.Sync(map[uint16]Target{p: {Addr: addr, Label: "node"}})
+	if ps, _ := m.Status(); len(ps) != 1 || ps[0].Label != "node" {
+		t.Errorf("status = %+v", ps)
+	}
+}
+
 func TestTargetChangeUpdatesInPlace(t *testing.T) {
 	remote := &fakeRemote{handler: echo}
 	m := New(remote, Options{})
 	defer m.Close()
 	p := freePort(t)
 	m.Sync(target(p))
-	m.Sync(map[uint16]netip.AddrPort{p: netip.AddrPortFrom(netip.IPv6Loopback(), p)})
+	m.Sync(map[uint16]Target{p: {Addr: netip.AddrPortFrom(netip.IPv6Loopback(), p)}})
 	roundTrip(t, fmt.Sprintf("127.0.0.1:%d", p), "x")
 	remote.mu.Lock()
 	defer remote.mu.Unlock()
@@ -333,9 +360,9 @@ func TestCloseAbortsEverythingWithoutLeaks(t *testing.T) {
 
 	m := New(&fakeRemote{handler: echo}, Options{})
 	p1, p2 := freePort(t), freePort(t)
-	m.Sync(map[uint16]netip.AddrPort{
-		p1: netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", p1)),
-		p2: netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", p2)),
+	m.Sync(map[uint16]Target{
+		p1: {Addr: netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", p1))},
+		p2: {Addr: netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", p2))},
 	})
 	var conns []net.Conn
 	for _, p := range []uint16{p1, p2, p1} {

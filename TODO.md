@@ -18,7 +18,6 @@ Deferred items, mostly from the pre-release reviews (October 2026). Nothing here
 - **`--interval` too small via the config file** reports as `--interval must be at least 100ms` without naming the file.
 - **Unknown-host-key error with ProxyJump** should say which hop.
 - **Password and keyboard-interactive login.** Only public-key auth is supported.
-- **Filter by owner.** The `uid` column of `/proc/net/tcp` is parsed out but unused. An option such as `--mine` would forward only ports owned by the SSH user, so system services are skipped.
 - **Interactive mode:** pin/mute a port and per-port connection history are deferred to the daemon/TUI idea below. The status footer caps at nine rows.
 
 ## Tests

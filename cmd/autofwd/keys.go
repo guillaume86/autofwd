@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"os"
-	"sync/atomic"
 	"time"
 
 	"github.com/guillaume86/autofwd/internal/forward"
@@ -12,27 +11,16 @@ import (
 	"github.com/guillaume86/autofwd/internal/ui"
 )
 
-const keyHelp = "keys: s status  v verbose  o open newest  1-9 open row  r poll now  q quit"
-
-// runKeys handles keypresses and the status footer until ctx ends. It
-// returns immediately when there is no interactive input.
+// runKeys handles keypresses and keeps the status footer up to date until
+// ctx ends. It returns immediately when there is no interactive input.
 func runKeys(ctx context.Context, cancel context.CancelFunc, term *ui.Terminal, input *ui.Input, sup *supervisor.Supervisor, log *logx.Logger) {
 	if input == nil || !term.Interactive() {
 		return
 	}
-	log.Infof("press s for status, ? for keys")
 
-	var shown atomic.Bool
-	refresh := make(chan struct{}, 1)
-	kick := func() {
-		select {
-		case refresh <- struct{}{}:
-		default:
-		}
-	}
-
-	// The footer redraws every second while shown (ages, countdowns) and
-	// right away on toggle.
+	// The footer redraws every second (ages, countdowns).
+	draw := func() { term.SetFooter(formatStatus(sup.Status(), term.Width(), time.Now())) }
+	draw()
 	go func() {
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
@@ -41,12 +29,7 @@ func runKeys(ctx context.Context, cancel context.CancelFunc, term *ui.Terminal, 
 			case <-ctx.Done():
 				return
 			case <-t.C:
-			case <-refresh:
-			}
-			if shown.Load() {
-				term.SetFooter(formatStatus(sup.Status(), term.Width(), time.Now()))
-			} else {
-				term.SetFooter(nil)
+				draw()
 			}
 		}
 	}()
@@ -72,9 +55,6 @@ func runKeys(ctx context.Context, cancel context.CancelFunc, term *ui.Terminal, 
 					os.Exit(130)
 				}
 				cancel()
-			case 's', ' ':
-				shown.Store(!shown.Load())
-				kick()
 			case 'v':
 				if log.Level() == logx.Verbose {
 					log.SetLevel(logx.Normal)
@@ -106,8 +86,6 @@ func runKeys(ctx context.Context, cancel context.CancelFunc, term *ui.Terminal, 
 				} else {
 					log.Infof("~ no row %c", k)
 				}
-			case '?', 'h':
-				log.Infof(keyHelp)
 			}
 		}
 	}()

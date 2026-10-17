@@ -6,10 +6,12 @@ import (
 	"cmp"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/guillaume86/autofwd/internal/procinfo"
 	"github.com/guillaume86/autofwd/internal/procnet"
 )
 
@@ -81,8 +83,53 @@ func (s Set) String() string {
 type Filter struct {
 	MinPort uint16
 	Ignore  Set
-	// Only, when non-empty, is an allowlist that replaces MinPort and Ignore.
+	// Only, when non-empty, is an allowlist that replaces every other rule.
 	Only Set
+	// AllUsers forwards other users' sockets too. Without it, a socket owned
+	// by someone else is forwarded only when a process's command line names
+	// its port, as Docker's proxy does.
+	AllUsers bool
+	// IgnoreProcess skips sockets whose process name, command line or
+	// systemd unit matches one of these.
+	IgnoreProcess []*regexp.Regexp
+}
+
+// DefaultIgnoreProcess lists the processes skipped unless the user sets
+// their own list: daemons that listen on random high ports for their own
+// use, and editor servers that do their own forwarding.
+var DefaultIgnoreProcess = []string{
+	`^tailscaled$`,
+	`^containerd$`,
+	`^dockerd$`,
+	`^sshd$`,
+	`/\.(vscode|cursor|windsurf)-server`,
+}
+
+// ProcessReason explains why listener l, whose socket was resolved to s, is
+// not forwarded, or returns "" when it is. It complements Reason, which
+// looks at the port number alone. Whatever env could not determine never
+// excludes anything, so a host that hides process details behaves as if
+// these rules did not exist.
+func (f Filter) ProcessReason(l procnet.Listener, s procinfo.Socket, env procinfo.Env) string {
+	if len(f.Only) > 0 {
+		return ""
+	}
+	// The owner rule needs the user's uid, the socket's owner and the
+	// ability to see other users' command lines; without the last one a
+	// Docker-published port could not be told apart.
+	if !f.AllUsers && env.UID >= 0 && env.OthersVisible && l.HasOwner() &&
+		int64(l.UID) != int64(env.UID) && !s.NamesPort {
+		return "owned by " + env.UserName(l.UID)
+	}
+	for _, re := range f.IgnoreProcess {
+		if p := s.Proc; p != nil && (re.MatchString(p.Name) || (p.Cmdline != "" && re.MatchString(p.Cmdline))) {
+			return "in --ignore-process"
+		}
+		if s.Unit != "" && re.MatchString(s.Unit) {
+			return "in --ignore-process"
+		}
+	}
+	return ""
 }
 
 // Allow reports whether port p should be forwarded.

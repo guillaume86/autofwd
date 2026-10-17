@@ -3,6 +3,7 @@
 package forward
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -57,6 +58,7 @@ type Manager struct {
 type port struct {
 	num       uint16
 	target    atomic.Pointer[netip.AddrPort]
+	label     string // guarded by Manager.mu
 	listeners []net.Listener
 	since     time.Time
 	conns     atomic.Int32 // proxied connections currently open
@@ -69,10 +71,17 @@ type failure struct {
 	retryAt time.Time
 }
 
+// Target is where a forwarded port leads on the remote side.
+type Target struct {
+	Addr  netip.AddrPort // dialed for each connection
+	Label string         // the remote process, for display; may be empty
+}
+
 // PortStatus describes one active forward.
 type PortStatus struct {
 	Port   uint16
 	Target netip.AddrPort // dialed on the remote side
+	Label  string
 	Since  time.Time
 	Conns  int
 }
@@ -91,12 +100,16 @@ func LocalURL(port uint16) string { return "http://localhost:" + strconv.Itoa(in
 // loopback4 is the remote target that needs no mention in log lines.
 var loopback4 = netip.MustParseAddr("127.0.0.1")
 
-// describe renders the "+ port" line: the clickable local URL, and the
-// remote target only when it is not the usual 127.0.0.1.
-func describe(num uint16, target netip.AddrPort) string {
+// describe renders the "+ port" line: the clickable local URL, the remote
+// process when known, and the remote target only when it is not the usual
+// 127.0.0.1.
+func describe(num uint16, t Target) string {
 	s := fmt.Sprintf("+ %d  %s", num, LocalURL(num))
-	if target.Addr() != loopback4 {
-		s += fmt.Sprintf("  (remote %s)", target.Addr())
+	if t.Label != "" {
+		s += "  " + t.Label
+	}
+	if t.Addr.Addr() != loopback4 {
+		s += fmt.Sprintf("  (remote %s)", t.Addr.Addr())
 	}
 	return s
 }
@@ -131,7 +144,7 @@ func (m *Manager) Status() ([]PortStatus, []BusyStatus) {
 	var ps []PortStatus
 	for _, num := range slices.Sorted(maps.Keys(m.ports)) {
 		p := m.ports[num]
-		ps = append(ps, PortStatus{Port: num, Target: *p.target.Load(), Since: p.since, Conns: int(p.conns.Load())})
+		ps = append(ps, PortStatus{Port: num, Target: *p.target.Load(), Label: p.label, Since: p.since, Conns: int(p.conns.Load())})
 	}
 	var bs []BusyStatus
 	for _, num := range slices.Sorted(maps.Keys(m.failed)) {
@@ -152,10 +165,10 @@ func (m *Manager) RetryNow() {
 	}
 }
 
-// Sync makes the local listeners match desired, a map of port to the remote
-// address to dial. Removed ports stop listening at once, but connections
-// already accepted on them run to completion.
-func (m *Manager) Sync(desired map[uint16]netip.AddrPort) {
+// Sync makes the local listeners match desired, a map of port to its remote
+// target. Removed ports stop listening at once, but connections already
+// accepted on them run to completion.
+func (m *Manager) Sync(desired map[uint16]Target) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -178,10 +191,16 @@ func (m *Manager) Sync(desired map[uint16]netip.AddrPort) {
 
 	now := m.opts.Now()
 	for _, num := range slices.Sorted(maps.Keys(desired)) {
-		target := desired[num]
+		want := desired[num]
+		target := want.Addr
 		if p, ok := m.ports[num]; ok {
 			if old := p.target.Swap(&target); *old != target {
 				m.log.Infof("~ %d  remote listener moved to %s", num, target)
+			}
+			if want.Label != p.label {
+				// A restarted server, or a lookup that failed earlier.
+				m.log.Debugf("  %d is now %s", num, cmp.Or(want.Label, "unknown"))
+				p.label = want.Label
 			}
 			continue
 		}
@@ -200,9 +219,9 @@ func (m *Manager) Sync(desired map[uint16]netip.AddrPort) {
 			continue
 		}
 		delete(m.failed, num)
-		p.since = now
+		p.since, p.label = now, want.Label
 		m.ports[num] = p
-		m.log.Infof("%s", describe(num, target))
+		m.log.Infof("%s", describe(num, want))
 	}
 }
 
