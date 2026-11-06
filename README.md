@@ -77,6 +77,7 @@ autofwd [flags] [user@]<host>
 | `-v`, `--verbose` | | Also log each proxied connection, keepalives and diagnostics. |
 | `--log` | | Plain log: no colors, keys or status footer. Automatic when stderr or stdin is not a terminal. |
 | `--config` | see below | Path to the config file. |
+| `--status-file` | | Keep a JSON snapshot of the state at this path, for other programs. See [Status file](#status-file). |
 | `--version` | | Print the version. |
 
 Press Ctrl+C to close every listener and the SSH connection, then exit. A second Ctrl+C kills the process immediately.
@@ -94,6 +95,47 @@ Press Ctrl+C to close every listener and the SSH connection, then exit. A second
 | `connected to …` / `disconnected from …: reason` | Connection state. A reconnect says how long the connection was down. |
 
 The exit status is 0 after Ctrl+C, 1 on a fatal error (see [Reconnects](#reconnects)) and 2 for a usage error.
+
+### Status file
+
+With `--status-file <path>`, autofwd keeps a JSON snapshot of what the status footer shows, so another program (a tray icon, an editor panel, a script) can display it. Two placeholders make the path unique: `{pid}` becomes autofwd's process ID and `{host}` the host alias, with characters that are unsafe in file names replaced by `_`. A leading `~` is the home directory, for programs that start autofwd without a shell. Missing folders are created.
+
+```sh
+autofwd --status-file ~/.cache/autofwd/{pid}.json devbox
+```
+
+The file is checked against the state twice a second and rewritten only when something changed, through a temporary file (`.<name>.*.tmp` in the same folder) and a rename, so a reader never sees half of it. A clean exit (Ctrl+C, `q`, SIGTERM) removes it. A fatal error leaves it behind with `"state": "failed"` and the reason in `"error"`. A process that is killed outright leaves its last snapshot, which is what `{pid}` lets a reader recognize: no autofwd runs with that ID any more.
+
+```json
+{
+  "format": 1,
+  "version": "0.3.0",
+  "pid": 4812,
+  "host": "devbox",
+  "started": "2026-11-06T09:00:00.000Z",
+  "state": "connected",
+  "since": "2026-11-06T09:00:01.250Z",
+  "retry_at": null,
+  "error": "",
+  "last_keepalive": "2026-11-06T09:30:01.300Z",
+  "forwards": [
+    { "port": 3000, "url": "http://localhost:3000", "remote": "127.0.0.1:3000",
+      "process": "node", "dir": "~/src/shop", "since": "2026-11-06T09:00:01.400Z", "conns": 2 }
+  ],
+  "busy": [ { "port": 9229, "reason": "local port busy: …", "retry_at": "2026-11-06T09:00:31.400Z" } ],
+  "skipped": [ { "port": 45747, "reason": "owned by root", "process": "containerd" } ]
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `format` | `1`. It goes up only on incompatible changes; new keys can appear without it. |
+| `state` | `connecting`, `connected`, `reconnecting` (waiting until `retry_at`) or `failed` (autofwd stopped; see `error`). `since` is when it began. |
+| `error` | Why the last attempt or connection ended, or why autofwd stopped. Empty while connected. |
+| `forwards` | One entry per forwarded port, as in the footer. `process` and `dir` are empty when unknown. `conns` is the number of connections open now. |
+| `busy`, `skipped` | Ports that could not be bound locally, and ports the filters excluded. |
+
+Times are RFC 3339 in UTC with milliseconds; `retry_at` and `last_keepalive` are `null` when they don't apply. Lists are always present, possibly empty.
 
 ## Config file
 
@@ -282,7 +324,7 @@ CGO_ENABLED=1 go test -race ./...    # the race detector needs a C toolchain
 
 | Package | Role |
 |---|---|
-| `cmd/autofwd` | Flags, config-file merging, signal handling. |
+| `cmd/autofwd` | Flags, config-file merging, signal handling, the status footer and the status file. |
 | `internal/procnet` | `/proc/net/tcp{,6}` parser. Fixtures are in `testdata/`. |
 | `internal/procinfo` | The remote process lookup script and the parser for its output. Fixtures from Ubuntu and BusyBox are in `testdata/`; on Linux, a test also runs the script for real. |
 | `internal/ports` | Port lists, filtering (port, owner and process rules), choosing the remote dial address. |

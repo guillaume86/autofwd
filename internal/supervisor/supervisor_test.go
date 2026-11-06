@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/guillaume86/autofwd/internal/forward"
 	"github.com/guillaume86/autofwd/internal/logx"
 	"github.com/guillaume86/autofwd/internal/ports"
 	"github.com/guillaume86/autofwd/internal/procinfo"
@@ -327,8 +328,8 @@ func TestProcessRules(t *testing.T) {
 		t.Errorf("skipped = %+v\nwant      %+v", st.Skipped, want)
 	}
 	for _, f := range st.Forwards {
-		if f.Port == pNode && f.Label != "node  ~/app" {
-			t.Errorf("status label %q", f.Label)
+		if want := (forward.Remote{Label: "node  ~/app", Process: "node", Dir: "~/app"}); f.Port == pNode && f.Remote != want {
+			t.Errorf("status remote %+v, want %+v", f.Remote, want)
 		}
 	}
 

@@ -60,6 +60,7 @@ type options struct {
 	verbose       bool
 	plain         bool
 	configPath    string
+	statusFile    string
 }
 
 // patternsFlag collects a repeatable regexp flag. The first use replaces
@@ -145,6 +146,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&o.verbose, "v", false, "shorthand for --verbose")
 	fs.BoolVar(&o.plain, "log", false, "plain log output: no colors, keys or status footer (automatic when not on a terminal)")
 	fs.StringVar(&o.configPath, "config", "", "config file `path` (default "+config.DefaultPath()+")")
+	fs.StringVar(&o.statusFile, "status-file", "", "keep a JSON snapshot of the state at this `path`; {pid} and {host} are replaced, a leading ~ is home")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 
 	// Accept flags after the host too: autofwd devbox -v.
@@ -185,6 +187,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	statusPath := ""
+	if set["status-file"] {
+		p, err := expandStatusPath(o.statusFile, alias, os.Getpid())
+		if err != nil {
+			return usageError("--status-file: %v", err)
+		}
+		statusPath = p
+	}
 	if err := applyConfig(&o, set, alias); err != nil {
 		return usageError("config file: %v", err)
 	}
@@ -232,16 +242,35 @@ func run(args []string, stdout, stderr io.Writer) int {
 	log := logx.New(term, level)
 	prompt := ui.Prompter{Term: term, Input: input}
 
+	// With --status-file, a fatal error is recorded there too.
+	var sf *statusFile
+	started := time.Now()
+	if statusPath != "" {
+		if sf, err = newStatusFile(statusPath, dest, os.Getpid(), started); err != nil {
+			fmt.Fprintln(stderr, "autofwd: status file:", err)
+			return 1
+		}
+	}
+	fail := func(st supervisor.Status, err error) int {
+		term.Close()
+		fmt.Fprintln(stderr, "autofwd:", err)
+		if sf != nil {
+			if werr := sf.finish(st, err); werr != nil {
+				fmt.Fprintln(stderr, "autofwd: status file:", werr)
+			}
+		}
+		return 1
+	}
+	initial := supervisor.Status{Dest: dest, State: supervisor.Connecting, Since: started}
+
 	resolver, err := sshconn.NewResolver()
 	if err != nil {
-		fmt.Fprintln(stderr, "autofwd:", err)
-		return 1
+		return fail(initial, err)
 	}
 	dialer := sshconn.NewDialer(resolver, prompt.Prompt, log)
 	h, err := dialer.Resolve(dest)
 	if err != nil {
-		fmt.Fprintln(stderr, "autofwd:", err)
-		return 1
+		return fail(initial, err)
 	}
 	via := ""
 	if h.ProxyJump != "" {
@@ -267,10 +296,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Log:      log,
 	})
 	runKeys(ctx, cancel, term, input, sup, log)
-	if err := sup.Run(ctx); err != nil {
-		term.Close()
-		fmt.Fprintln(stderr, "autofwd:", err)
-		return 1
+	var statusDone <-chan struct{}
+	statusCtx, stopStatus := context.WithCancel(ctx)
+	defer stopStatus()
+	if sf != nil {
+		statusDone = runStatusFile(statusCtx, sf, sup, log)
+	}
+	runErr := sup.Run(ctx)
+	stopStatus()
+	if statusDone != nil {
+		<-statusDone // no write may land after the final one
+	}
+	if runErr != nil {
+		return fail(sup.Status(), runErr)
+	}
+	if sf != nil {
+		if err := sf.finish(sup.Status(), nil); err != nil {
+			fmt.Fprintln(stderr, "autofwd: status file:", err)
+		}
 	}
 	return 0
 }

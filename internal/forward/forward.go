@@ -58,7 +58,7 @@ type Manager struct {
 type port struct {
 	num       uint16
 	target    atomic.Pointer[netip.AddrPort]
-	label     string // guarded by Manager.mu
+	remote    Remote // guarded by Manager.mu
 	listeners []net.Listener
 	since     time.Time
 	conns     atomic.Int32 // proxied connections currently open
@@ -73,17 +73,25 @@ type failure struct {
 
 // Target is where a forwarded port leads on the remote side.
 type Target struct {
-	Addr  netip.AddrPort // dialed for each connection
-	Label string         // the remote process, for display; may be empty
+	Addr netip.AddrPort // dialed for each connection
+	Remote
+}
+
+// Remote is what is known about the remote process behind a port. Every
+// field may be empty.
+type Remote struct {
+	Label   string // for display: the process and its directory, or the unit
+	Process string // the process name, or the systemd unit
+	Dir     string // the process's working directory, home shortened to ~
 }
 
 // PortStatus describes one active forward.
 type PortStatus struct {
 	Port   uint16
 	Target netip.AddrPort // dialed on the remote side
-	Label  string
-	Since  time.Time
-	Conns  int
+	Remote
+	Since time.Time
+	Conns int
 }
 
 // BusyStatus describes a port that is listening remotely but could not be
@@ -144,7 +152,7 @@ func (m *Manager) Status() ([]PortStatus, []BusyStatus) {
 	var ps []PortStatus
 	for _, num := range slices.Sorted(maps.Keys(m.ports)) {
 		p := m.ports[num]
-		ps = append(ps, PortStatus{Port: num, Target: *p.target.Load(), Label: p.label, Since: p.since, Conns: int(p.conns.Load())})
+		ps = append(ps, PortStatus{Port: num, Target: *p.target.Load(), Remote: p.remote, Since: p.since, Conns: int(p.conns.Load())})
 	}
 	var bs []BusyStatus
 	for _, num := range slices.Sorted(maps.Keys(m.failed)) {
@@ -197,10 +205,12 @@ func (m *Manager) Sync(desired map[uint16]Target) {
 			if old := p.target.Swap(&target); *old != target {
 				m.log.Infof("~ %d  remote listener moved to %s", num, target)
 			}
-			if want.Label != p.label {
+			if want.Remote != p.remote {
 				// A restarted server, or a lookup that failed earlier.
-				m.log.Debugf("  %d is now %s", num, cmp.Or(want.Label, "unknown"))
-				p.label = want.Label
+				if want.Label != p.remote.Label {
+					m.log.Debugf("  %d is now %s", num, cmp.Or(want.Label, "unknown"))
+				}
+				p.remote = want.Remote
 			}
 			continue
 		}
@@ -219,7 +229,7 @@ func (m *Manager) Sync(desired map[uint16]Target) {
 			continue
 		}
 		delete(m.failed, num)
-		p.since, p.label = now, want.Label
+		p.since, p.remote = now, want.Remote
 		m.ports[num] = p
 		m.log.Infof("%s", describe(num, want))
 	}

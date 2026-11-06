@@ -133,14 +133,27 @@ func (s Socket) Known() bool { return s.Proc != nil || s.Unit != "" }
 // Label is the short description shown next to a forwarded port: the
 // process name and its working directory, or the unit name.
 func (s Socket) Label(home string) string {
-	switch {
-	case s.Proc != nil && s.Proc.Cwd != "":
-		return s.Proc.Name + "  " + tilde(s.Proc.Cwd, home)
-	case s.Proc != nil:
-		return s.Proc.Name
-	default:
-		return s.Unit
+	if dir := s.Dir(home); dir != "" {
+		return s.Name() + "  " + dir
 	}
+	return s.Name()
+}
+
+// Name is the process name, or the systemd unit when no process was found.
+func (s Socket) Name() string {
+	if s.Proc != nil {
+		return s.Proc.Name
+	}
+	return s.Unit
+}
+
+// Dir is the process's working directory with home shortened to ~, or ""
+// when it is not known (another user's process, or no process at all).
+func (s Socket) Dir(home string) string {
+	if s.Proc == nil || s.Proc.Cwd == "" {
+		return ""
+	}
+	return tilde(s.Proc.Cwd, home)
 }
 
 func tilde(dir, home string) string {

@@ -479,7 +479,8 @@ func (s *Supervisor) labelTargets(ps *procState, kept []procnet.Listener, target
 			continue
 		}
 		if sock := ps.sockets[l.Inode]; sock.Known() {
-			t.Label = sock.Label(ps.env.Home)
+			home := ps.env.Home
+			t.Remote = forward.Remote{Label: sock.Label(home), Process: sock.Name(), Dir: sock.Dir(home)}
 			out[l.Port] = t
 		}
 	}

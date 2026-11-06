@@ -303,8 +303,8 @@ func TestDescribe(t *testing.T) {
 		want string
 	}{
 		{Target{Addr: netip.MustParseAddrPort("127.0.0.1:3000")}, "+ 3000  http://localhost:3000"},
-		{Target{Addr: netip.MustParseAddrPort("127.0.0.1:3000"), Label: "node  ~/app"}, "+ 3000  http://localhost:3000  node  ~/app"},
-		{Target{Addr: netip.MustParseAddrPort("[::1]:3000"), Label: "vite"}, "+ 3000  http://localhost:3000  vite  (remote ::1)"},
+		{Target{Addr: netip.MustParseAddrPort("127.0.0.1:3000"), Remote: Remote{Label: "node  ~/app"}}, "+ 3000  http://localhost:3000  node  ~/app"},
+		{Target{Addr: netip.MustParseAddrPort("[::1]:3000"), Remote: Remote{Label: "vite"}}, "+ 3000  http://localhost:3000  vite  (remote ::1)"},
 	} {
 		if got := describe(3000, tt.t); got != tt.want {
 			t.Errorf("describe = %q, want %q", got, tt.want)
@@ -318,7 +318,7 @@ func TestLabelUpdatesInPlace(t *testing.T) {
 	p := freePort(t)
 	addr := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), p)
 	m.Sync(map[uint16]Target{p: {Addr: addr}})
-	m.Sync(map[uint16]Target{p: {Addr: addr, Label: "node"}})
+	m.Sync(map[uint16]Target{p: {Addr: addr, Remote: Remote{Label: "node", Process: "node"}}})
 	if ps, _ := m.Status(); len(ps) != 1 || ps[0].Label != "node" {
 		t.Errorf("status = %+v", ps)
 	}

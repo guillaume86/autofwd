@@ -17,7 +17,7 @@ func sampleStatus(now time.Time) supervisor.Status {
 		Since:         now.Add(-(2*time.Hour + 14*time.Minute)),
 		LastKeepalive: now.Add(-12 * time.Second),
 		Forwards: []forward.PortStatus{
-			{Port: 3000, Target: netip.MustParseAddrPort("127.0.0.1:3000"), Label: "node  ~/src/app", Since: now.Add(-90 * time.Minute), Conns: 3},
+			{Port: 3000, Target: netip.MustParseAddrPort("127.0.0.1:3000"), Remote: forward.Remote{Label: "node  ~/src/app"}, Since: now.Add(-90 * time.Minute), Conns: 3},
 			{Port: 5173, Target: netip.MustParseAddrPort("[::1]:5173"), Since: now.Add(-40 * time.Second), Conns: 0},
 		},
 		Busy: []forward.BusyStatus{{Port: 9229, Reason: "local port busy: another local process listens on it", RetryAt: now.Add(18 * time.Second)}},
