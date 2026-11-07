@@ -11,6 +11,9 @@
 //   - ss -e, when iproute2 is installed and the kernel reports it, gives
 //     the cgroup (systemd unit) of every socket, other users' included.
 //     /proc/*/cgroup then says which processes are in that cgroup.
+//   - docker ps, when a docker-proxy runs and the SSH user may use Docker,
+//     names the container behind each published port. docker-proxy's own
+//     command line already gives the container's address.
 //
 // The script prints each source in a marked section and all parsing happens
 // here, so a missing tool or an unreadable file only empties its section.
@@ -61,7 +64,8 @@ echo '` + marker + `ss'
 ss -tlne 2>/dev/null
 echo '` + marker + `cgroup'
 head -n 64 /dev/null /proc/[0-9]*/cgroup 2>/dev/null
-echo '` + marker + `cmdline'
+echo '` + marker + `docker'
+` + dockerSection + `echo '` + marker + `cmdline'
 head -c 2048 /dev/null /proc/[0-9]*/cmdline 2>/dev/null
 echo
 echo '` + marker + `end'
@@ -125,14 +129,21 @@ type Socket struct {
 	// the signature of a proxy such as Docker's that listens on behalf of
 	// another user.
 	NamesPort bool
+	// Container is set when Proc is a docker-proxy.
+	Container Container
 }
 
 // Known reports whether anything was found.
 func (s Socket) Known() bool { return s.Proc != nil || s.Unit != "" }
 
 // Label is the short description shown next to a forwarded port: the
-// process name and its working directory, or the unit name.
+// process name and its Docker container or working directory, or the unit
+// name. The container comes first: logged in as root, docker-proxy's
+// directory is readable too, and it is always /.
 func (s Socket) Label(home string) string {
+	if c := s.Container.String(); c != "" {
+		return s.Name() + "  " + c
+	}
 	if dir := s.Dir(home); dir != "" {
 		return s.Name() + "  " + dir
 	}
@@ -231,6 +242,7 @@ func Parse(out []byte, ls []procnet.Listener) (Env, map[uint64]Socket) {
 	holders := parseFD(sec["fd"])
 	sockCgroups := parseSS(sec["ss"])
 	env.Cgroups = len(sockCgroups) > 0
+	published := parseDockerPS(sec["docker"])
 
 	res := make(map[uint64]Socket, len(ls))
 	for _, l := range ls {
@@ -240,7 +252,11 @@ func Parse(out []byte, ls []procnet.Listener) (Env, map[uint64]Socket) {
 		if _, done := res[l.Inode]; done {
 			continue
 		}
-		res[l.Inode] = resolve(l, procs, holders[l.Inode], sockCgroups[l.Inode], env)
+		s := resolve(l, procs, holders[l.Inode], sockCgroups[l.Inode], env)
+		if s.Proc != nil && s.Proc.Name == "docker-proxy" {
+			s.Container = container(s.Proc.Cmdline, l.Addr, l.Port, published)
+		}
+		res[l.Inode] = s
 	}
 	return env, res
 }
@@ -285,7 +301,7 @@ func resolve(l procnet.Listener, procs procTable, holders []int, cgroup string, 
 		}
 	}
 	if len(matches) > 0 {
-		s.Proc, s.NamesPort = deepest(matches), true
+		s.Proc, s.NamesPort = deepest(sameHostIP(matches, l.Addr)), true
 	}
 	return s
 }

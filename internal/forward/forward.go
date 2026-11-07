@@ -80,9 +80,13 @@ type Target struct {
 // Remote is what is known about the remote process behind a port. Every
 // field may be empty.
 type Remote struct {
-	Label   string // for display: the process and its directory, or the unit
+	Label   string // for display: the process and its directory or container, or the unit
 	Process string // the process name, or the systemd unit
 	Dir     string // the process's working directory, home shortened to ~
+	// Container and ContainerAddr describe the Docker container behind a
+	// docker-proxy: its name, when docker ps could tell, and its address.
+	Container     string
+	ContainerAddr netip.AddrPort
 }
 
 // PortStatus describes one active forward.

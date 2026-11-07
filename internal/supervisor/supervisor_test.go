@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"regexp"
 	"slices"
 	"strings"
@@ -254,13 +255,15 @@ func TestEndToEnd(t *testing.T) {
 
 // procInfoOutput fakes the lookup script's output for TestProcessRules.
 // containerd's root-owned socket is attributed through its cgroup, the
-// Docker one through the port in docker-proxy's command line.
+// Docker one through the port in docker-proxy's command line, and its
+// container named by docker ps.
 func procInfoOutput(pContainerd, pDocker uint16) string {
 	return "@@autofwd id\n1000\n/home/tester\n" +
 		fmt.Sprintf("@@autofwd ss\nLISTEN 0 4096 127.0.0.1:%d 0.0.0.0:* ino:13 sk:1 cgroup:/system.slice/containerd.service <->\n", pContainerd) +
 		"@@autofwd cgroup\n==> /dev/null <==\n\n==> /proc/300/cgroup <==\n0::/system.slice/containerd.service\n\n" +
 		"==> /proc/301/cgroup <==\n0::/system.slice/docker.service\n" +
 		"@@autofwd passwd\nroot:0\ntester:1000\n" +
+		fmt.Sprintf("@@autofwd docker\nshop-db-1 0.0.0.0:%d->5432/tcp, [::]:%d->5432/tcp\nredis 6379/tcp\n", pDocker, pDocker) +
 		"@@autofwd fd\n/proc/200/fd/:\nl 3 -> socket:[11]\n/proc/201/fd/:\nl 3 -> socket:[12]\n/proc/202/fd/:\nl 3 -> socket:[15]\n" +
 		"@@autofwd cwd\nl /proc/200/cwd -> /home/tester/app\nl /proc/201/cwd -> /home/tester\nl /proc/202/cwd -> /srv\n" +
 		"@@autofwd stat\n1 (init) S 0\n200 (node) S 1\n201 (tailscaled) S 1\n202 (python3) S 1\n300 (containerd) S 1\n301 (docker-proxy) S 1\n" +
@@ -270,7 +273,8 @@ func procInfoOutput(pContainerd, pDocker uint16) string {
 		"==> /proc/201/cmdline <==\n/usr/sbin/tailscaled\x00--tun=userspace-networking\x00\n" +
 		"==> /proc/202/cmdline <==\npython3\x00-m\x00http.server\x00\n" +
 		"==> /proc/300/cmdline <==\n/usr/bin/containerd\x00\n" +
-		fmt.Sprintf("==> /proc/301/cmdline <==\n/usr/bin/docker-proxy\x00-host-port\x00%d\x00\n", pDocker) +
+		fmt.Sprintf("==> /proc/301/cmdline <==\n/usr/bin/docker-proxy\x00-proto\x00tcp\x00-host-ip\x000.0.0.0\x00-host-port\x00%d\x00"+
+			"-container-ip\x00172.18.0.2\x00-container-port\x005432\x00\n", pDocker) +
 		"@@autofwd end\n"
 }
 
@@ -309,7 +313,7 @@ func TestProcessRules(t *testing.T) {
 	dialExchange(t, hp("127.0.0.1", pDocker), "published by docker")
 	for _, want := range []string{
 		fmt.Sprintf("+ %d  http://localhost:%d  node  ~/app\n", pNode, pNode),
-		fmt.Sprintf("+ %d  http://localhost:%d  docker-proxy\n", pDocker, pDocker),
+		fmt.Sprintf("+ %d  http://localhost:%d  docker-proxy  shop-db-1\n", pDocker, pDocker),
 		"process info: uid 1000, other users' processes visible, socket cgroups from ss",
 		fmt.Sprintf("not forwarding %d tailscaled: in --ignore-process", pTail),
 		fmt.Sprintf("not forwarding %d containerd: owned by root", pContainerd),
@@ -329,6 +333,10 @@ func TestProcessRules(t *testing.T) {
 	}
 	for _, f := range st.Forwards {
 		if want := (forward.Remote{Label: "node  ~/app", Process: "node", Dir: "~/app"}); f.Port == pNode && f.Remote != want {
+			t.Errorf("status remote %+v, want %+v", f.Remote, want)
+		}
+		if want := (forward.Remote{Label: "docker-proxy  shop-db-1", Process: "docker-proxy", Container: "shop-db-1",
+			ContainerAddr: netip.MustParseAddrPort("172.18.0.2:5432")}); f.Port == pDocker && f.Remote != want {
 			t.Errorf("status remote %+v, want %+v", f.Remote, want)
 		}
 	}

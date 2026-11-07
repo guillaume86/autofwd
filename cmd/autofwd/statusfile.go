@@ -53,8 +53,12 @@ type statusForward struct {
 	Remote  string `json:"remote"`  // the address dialed on the remote side
 	Process string `json:"process"` // the remote process or systemd unit, when known
 	Dir     string `json:"dir"`     // its working directory, home as ~, when known
-	Since   string `json:"since"`
-	Conns   int    `json:"conns"` // proxied connections open now
+	// The Docker container behind a docker-proxy: its name, when docker ps
+	// could tell, and its address.
+	Container     string `json:"container"`
+	ContainerAddr string `json:"container_addr"`
+	Since         string `json:"since"`
+	Conns         int    `json:"conns"` // proxied connections open now
 }
 
 type statusBusy struct {
@@ -168,10 +172,14 @@ func (f *statusFile) doc(st supervisor.Status) statusDoc {
 		d.LastKeepalive = nil
 	}
 	for _, p := range st.Forwards {
-		d.Forwards = append(d.Forwards, statusForward{
+		f := statusForward{
 			Port: p.Port, URL: forward.LocalURL(p.Port), Remote: p.Target.String(),
-			Process: p.Process, Dir: p.Dir, Since: isoTime(p.Since), Conns: p.Conns,
-		})
+			Process: p.Process, Dir: p.Dir, Container: p.Container, Since: isoTime(p.Since), Conns: p.Conns,
+		}
+		if p.ContainerAddr.IsValid() {
+			f.ContainerAddr = p.ContainerAddr.String()
+		}
+		d.Forwards = append(d.Forwards, f)
 	}
 	for _, b := range st.Busy {
 		d.Busy = append(d.Busy, statusBusy{Port: b.Port, Reason: b.Reason, RetryAt: isoTime(b.RetryAt)})

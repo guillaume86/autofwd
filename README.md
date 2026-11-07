@@ -86,7 +86,7 @@ Press Ctrl+C to close every listener and the SSH connection, then exit. A second
 
 | Line | Meaning |
 |---|---|
-| `+ 3000  http://localhost:3000  node  ~/src/shop` | The port is now forwarded; the URL is what to open. Then come the remote process and its working directory, when known (the directory only for your own processes). `(remote ::1)` or `(remote 10.0.0.5)` is added when the remote side is dialed somewhere other than `127.0.0.1`. |
+| `+ 3000  http://localhost:3000  node  ~/src/shop` | The port is now forwarded; the URL is what to open. Then come the remote process and its working directory, when known (the directory only for your own processes). For a Docker-published port it is the container instead: `docker-proxy  shop-db-1`, or its address `docker-proxy  172.17.0.2:5432` when the name can't be found (see [Remote processes](#remote-processes)). `(remote ::1)` or `(remote 10.0.0.5)` is added when the remote side is dialed somewhere other than `127.0.0.1`. |
 | `- 3000` | The forward was removed. Connections already open on it finish normally. On a disconnect, one line lists every port: `- 3000 5173`. |
 | `~ 3000  remote listener moved to [::1]:3000` | The remote listener changed address; the local listener stays. |
 | `! 8080 local port busy: reason (retry in 30s)` | Something on your machine already uses that port, so it is skipped. See [Busy ports](#busy-ports). |
@@ -120,7 +120,11 @@ The file is checked against the state twice a second and rewritten only when som
   "last_keepalive": "2026-11-06T09:30:01.300Z",
   "forwards": [
     { "port": 3000, "url": "http://localhost:3000", "remote": "127.0.0.1:3000",
-      "process": "node", "dir": "~/src/shop", "since": "2026-11-06T09:00:01.400Z", "conns": 2 }
+      "process": "node", "dir": "~/src/shop", "container": "", "container_addr": "",
+      "since": "2026-11-06T09:00:01.400Z", "conns": 2 },
+    { "port": 5432, "url": "http://localhost:5432", "remote": "127.0.0.1:5432",
+      "process": "docker-proxy", "dir": "", "container": "shop-db-1", "container_addr": "172.17.0.2:5432",
+      "since": "2026-11-06T09:00:01.400Z", "conns": 0 }
   ],
   "busy": [ { "port": 9229, "reason": "local port busy: …", "retry_at": "2026-11-06T09:00:31.400Z" } ],
   "skipped": [ { "port": 45747, "reason": "owned by root", "process": "containerd" } ]
@@ -132,7 +136,7 @@ The file is checked against the state twice a second and rewritten only when som
 | `format` | `1`. It goes up only on incompatible changes; new keys can appear without it. |
 | `state` | `connecting`, `connected`, `reconnecting` (waiting until `retry_at`) or `failed` (autofwd stopped; see `error`). `since` is when it began. |
 | `error` | Why the last attempt or connection ended, or why autofwd stopped. Empty while connected. |
-| `forwards` | One entry per forwarded port, as in the footer. `process` and `dir` are empty when unknown. `conns` is the number of connections open now. |
+| `forwards` | One entry per forwarded port, as in the footer. `process` and `dir` are empty when unknown. For a Docker-published port, `container` is the container's name and `container_addr` its address and port; either is empty when unknown. `conns` is the number of connections open now. |
 | `busy`, `skipped` | Ports that could not be bound locally, and ports the filters excluded. |
 
 Times are RFC 3339 in UTC with milliseconds; `retry_at` and `last_keepalive` are `null` when they don't apply. Lists are always present, possibly empty.
@@ -193,7 +197,8 @@ When a listening socket shows up that autofwd hasn't seen before, and its port p
 - `ls -l /proc/*/fd/` maps each socket to the processes holding it. This only works for your own processes. When a forked server's children hold the socket too, the parent is named.
 - `/proc/*/stat`, `/proc/*/cmdline` and `/proc/*/cwd` give each process's name, command line and working directory. Any user can read the first two; the working directory only for your own processes.
 - `ss -tlne`, if iproute2 is installed, gives each socket's cgroup, which on a systemd host is its unit, other users' sockets included. A unit with a single process (for example `containerd.service`) identifies it exactly.
-- Otherwise, a process whose command line contains the port number as a whole number is taken as the owner. This is VS Code's heuristic, and it catches Docker's `docker-proxy -host-port 5432`.
+- Otherwise, a process whose command line contains the port number as a whole number is taken as the owner. This is VS Code's heuristic, and it catches Docker's `docker-proxy -host-port 5432`. Docker starts one proxy per published address (`0.0.0.0` and `::`), so the one whose `-host-ip` is the socket's address wins.
+- For a `docker-proxy`, its own command line gives the container's address (`-container-ip`, `-container-port`). If a `docker-proxy` runs and you can use the `docker` CLI (you're in the `docker` group, or root), `docker ps` names the container whose published ports match. Without Docker access, or if `docker` takes more than 5 seconds, the address is shown instead.
 
 The lookup runs once per new socket, before the port is forwarded, so an excluded port never shows up even briefly. On an Ubuntu desktop it takes about 40 ms on the remote side.
 

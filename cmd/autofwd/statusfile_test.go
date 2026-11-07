@@ -67,6 +67,11 @@ func testStatus(now time.Time) supervisor.Status {
 			Port: 3000, Target: netip.MustParseAddrPort("127.0.0.1:3000"),
 			Remote: forward.Remote{Label: "node  ~/src/app", Process: "node", Dir: "~/src/app"},
 			Since:  now.Add(-time.Minute), Conns: 2,
+		}, {
+			Port: 5432, Target: netip.MustParseAddrPort("127.0.0.1:5432"),
+			Remote: forward.Remote{Label: "docker-proxy  db", Process: "docker-proxy", Container: "db",
+				ContainerAddr: netip.MustParseAddrPort("172.17.0.2:5432")},
+			Since: now.Add(-time.Minute),
 		}},
 		Busy:    []forward.BusyStatus{{Port: 9229, Reason: "local port busy", RetryAt: now.Add(30 * time.Second)}},
 		Skipped: []supervisor.Skipped{{Port: 45747, Reason: "owned by root", Process: "containerd"}},
@@ -107,7 +112,9 @@ func TestStatusFileContent(t *testing.T) {
 		Started: "2026-11-06T09:00:00.123Z", State: "connected", Since: "2026-11-06T10:00:00.123Z",
 		LastKeepalive: &keepalive,
 		Forwards: []statusForward{{Port: 3000, URL: "http://localhost:3000", Remote: "127.0.0.1:3000",
-			Process: "node", Dir: "~/src/app", Since: "2026-11-06T10:59:00.123Z", Conns: 2}},
+			Process: "node", Dir: "~/src/app", Since: "2026-11-06T10:59:00.123Z", Conns: 2},
+			{Port: 5432, URL: "http://localhost:5432", Remote: "127.0.0.1:5432", Process: "docker-proxy",
+				Container: "db", ContainerAddr: "172.17.0.2:5432", Since: "2026-11-06T10:59:00.123Z"}},
 		Busy:    []statusBusy{{Port: 9229, Reason: "local port busy", RetryAt: "2026-11-06T11:00:30.123Z"}},
 		Skipped: []statusSkipped{{Port: 45747, Reason: "owned by root", Process: "containerd"}},
 	}

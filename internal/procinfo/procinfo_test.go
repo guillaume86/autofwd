@@ -221,7 +221,7 @@ func TestTilde(t *testing.T) {
 
 func TestScript(t *testing.T) {
 	s := Script([]uint64{24689, 18104})
-	for _, want := range []string{"-e 'socket:[24689]' -e 'socket:[18104]'", "LC_ALL=C", "@@autofwd end"} {
+	for _, want := range []string{"-e 'socket:[24689]' -e 'socket:[18104]'", "LC_ALL=C", "@@autofwd docker", "@@autofwd end"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script lacks %q:\n%s", want, s)
 		}
